@@ -5,178 +5,307 @@
  * SAP Zero Harm Monitoring Dashboard API
  * OpenAPI spec version: 0.1.0
  */
-import * as zod from 'zod';
-
+import * as zod from "zod";
 
 /**
  * @summary Health check
  */
 export const HealthCheckResponse = zod.object({
-  "status": zod.string()
-})
-
+	status: zod.string(),
+});
 
 /**
  * @summary List all team members with their targets
  */
 export const ListMembersResponseItem = zod.object({
-  "nik": zod.string(),
-  "name": zod.string(),
-  "department": zod.string(),
-  "jabatan": zod.string(),
-  "isPjo": zod.boolean(),
-  "isOnLeave": zod.boolean(),
-  "targetHazard": zod.number(),
-  "targetInspeksi": zod.number(),
-  "targetObservasi": zod.number(),
-  "targetOpk": zod.number()
-})
-export const ListMembersResponse = zod.array(ListMembersResponseItem)
-
+	nik: zod.string(),
+	name: zod.string(),
+	department: zod.string(),
+	jabatan: zod.string(),
+	isPjo: zod.boolean(),
+	isHse: zod.boolean(),
+	isOnLeave: zod.boolean(),
+	targetTta: zod.number(),
+	targetHazard: zod.number(),
+	targetInspeksi: zod.number(),
+	targetObservasi: zod.number(),
+	targetOpkKeberadaanPengawas: zod.number(),
+	targetOpkFungsiPengawas: zod.number(),
+	targetOpkP2h: zod.number(),
+	targetOpkSeatbelt: zod.number(),
+	targetOpkSimper: zod.number(),
+	targetOpkRoster: zod.number(),
+	targetOpkFatigue: zod.number(),
+	targetOpkLototo: zod.number(),
+});
+export const ListMembersResponse = zod.array(ListMembersResponseItem);
 
 /**
  * @summary Create or update a team member
  */
 export const UpsertMemberBody = zod.object({
-  "nik": zod.string(),
-  "name": zod.string(),
-  "department": zod.string(),
-  "jabatan": zod.string(),
-  "isPjo": zod.boolean(),
-  "targetHazard": zod.number(),
-  "targetInspeksi": zod.number(),
-  "targetObservasi": zod.number(),
-  "targetOpk": zod.number()
-})
+	nik: zod.string(),
+	name: zod.string(),
+	department: zod.string(),
+	jabatan: zod.string(),
+	isPjo: zod.boolean(),
+	isHse: zod.boolean(),
+	targetTta: zod.number(),
+	targetHazard: zod.number(),
+	targetInspeksi: zod.number(),
+	targetObservasi: zod.number(),
+	targetOpkKeberadaanPengawas: zod.number(),
+	targetOpkFungsiPengawas: zod.number(),
+	targetOpkP2h: zod.number(),
+	targetOpkSeatbelt: zod.number(),
+	targetOpkSimper: zod.number(),
+	targetOpkRoster: zod.number(),
+	targetOpkFatigue: zod.number(),
+	targetOpkLototo: zod.number(),
+});
 
 export const UpsertMemberResponse = zod.object({
-  "nik": zod.string(),
-  "name": zod.string(),
-  "department": zod.string(),
-  "jabatan": zod.string(),
-  "isPjo": zod.boolean(),
-  "isOnLeave": zod.boolean(),
-  "targetHazard": zod.number(),
-  "targetInspeksi": zod.number(),
-  "targetObservasi": zod.number(),
-  "targetOpk": zod.number()
-})
+	nik: zod.string(),
+	name: zod.string(),
+	department: zod.string(),
+	jabatan: zod.string(),
+	isPjo: zod.boolean(),
+	isHse: zod.boolean(),
+	isOnLeave: zod.boolean(),
+	targetTta: zod.number(),
+	targetHazard: zod.number(),
+	targetInspeksi: zod.number(),
+	targetObservasi: zod.number(),
+	targetOpkKeberadaanPengawas: zod.number(),
+	targetOpkFungsiPengawas: zod.number(),
+	targetOpkP2h: zod.number(),
+	targetOpkSeatbelt: zod.number(),
+	targetOpkSimper: zod.number(),
+	targetOpkRoster: zod.number(),
+	targetOpkFatigue: zod.number(),
+	targetOpkLototo: zod.number(),
+});
 
+/**
+ * @summary Update a team member profile and targets
+ */
+export const UpdateMemberParams = zod.object({
+	nik: zod.coerce.string(),
+});
+
+export const UpdateMemberBody = zod.object({
+	name: zod.string().optional(),
+	department: zod.string().optional(),
+	jabatan: zod.string().optional(),
+	isPjo: zod.boolean().optional(),
+	isHse: zod.boolean().optional(),
+	isOnLeave: zod.boolean().optional(),
+	targetTta: zod.number().optional(),
+	targetHazard: zod.number().optional(),
+	targetInspeksi: zod.number().optional(),
+	targetObservasi: zod.number().optional(),
+	targetOpkKeberadaanPengawas: zod.number().optional(),
+	targetOpkFungsiPengawas: zod.number().optional(),
+	targetOpkP2h: zod.number().optional(),
+	targetOpkSeatbelt: zod.number().optional(),
+	targetOpkSimper: zod.number().optional(),
+	targetOpkRoster: zod.number().optional(),
+	targetOpkFatigue: zod.number().optional(),
+	targetOpkLototo: zod.number().optional(),
+});
+
+export const UpdateMemberResponse = zod.object({
+	nik: zod.string(),
+	name: zod.string(),
+	department: zod.string(),
+	jabatan: zod.string(),
+	isPjo: zod.boolean(),
+	isHse: zod.boolean(),
+	isOnLeave: zod.boolean(),
+	targetTta: zod.number(),
+	targetHazard: zod.number(),
+	targetInspeksi: zod.number(),
+	targetObservasi: zod.number(),
+	targetOpkKeberadaanPengawas: zod.number(),
+	targetOpkFungsiPengawas: zod.number(),
+	targetOpkP2h: zod.number(),
+	targetOpkSeatbelt: zod.number(),
+	targetOpkSimper: zod.number(),
+	targetOpkRoster: zod.number(),
+	targetOpkFatigue: zod.number(),
+	targetOpkLototo: zod.number(),
+});
 
 /**
  * @summary Delete a team member
  */
 export const DeleteMemberParams = zod.object({
-  "nik": zod.coerce.string()
-})
-
+	nik: zod.coerce.string(),
+});
 
 /**
  * @summary Set or unset leave status for a team member
  */
 export const SetMemberLeaveParams = zod.object({
-  "nik": zod.coerce.string()
-})
+	nik: zod.coerce.string(),
+});
 
 export const SetMemberLeaveBody = zod.object({
-  "isOnLeave": zod.boolean()
-})
+	isOnLeave: zod.boolean(),
+});
 
 export const SetMemberLeaveResponse = zod.object({
-  "nik": zod.string(),
-  "name": zod.string(),
-  "department": zod.string(),
-  "jabatan": zod.string(),
-  "isPjo": zod.boolean(),
-  "isOnLeave": zod.boolean(),
-  "targetHazard": zod.number(),
-  "targetInspeksi": zod.number(),
-  "targetObservasi": zod.number(),
-  "targetOpk": zod.number()
-})
-
+	nik: zod.string(),
+	name: zod.string(),
+	department: zod.string(),
+	jabatan: zod.string(),
+	isPjo: zod.boolean(),
+	isHse: zod.boolean(),
+	isOnLeave: zod.boolean(),
+	targetTta: zod.number(),
+	targetHazard: zod.number(),
+	targetInspeksi: zod.number(),
+	targetObservasi: zod.number(),
+	targetOpkKeberadaanPengawas: zod.number(),
+	targetOpkFungsiPengawas: zod.number(),
+	targetOpkP2h: zod.number(),
+	targetOpkSeatbelt: zod.number(),
+	targetOpkSimper: zod.number(),
+	targetOpkRoster: zod.number(),
+	targetOpkFatigue: zod.number(),
+	targetOpkLototo: zod.number(),
+});
 
 /**
  * @summary Upload BIB Excel file and process SAP data
  */
 export const UploadExcelResponse = zod.object({
-  "uploadId": zod.number(),
-  "weeksFound": zod.array(zod.string()),
-  "rowsProcessed": zod.number(),
-  "minergoRows": zod.number()
-})
-
+	uploadId: zod.number(),
+	weeksFound: zod.array(zod.string()),
+	rowsProcessed: zod.number(),
+	minergoRows: zod.number(),
+});
 
 /**
  * @summary List all uploaded Excel files
  */
 export const ListUploadsResponseItem = zod.object({
-  "id": zod.number(),
-  "filename": zod.string(),
-  "uploadedAt": zod.coerce.date(),
-  "weeksFound": zod.array(zod.string()),
-  "rowsProcessed": zod.number()
-})
-export const ListUploadsResponse = zod.array(ListUploadsResponseItem)
-
+	id: zod.number(),
+	filename: zod.string(),
+	uploadedAt: zod.coerce.date(),
+	weeksFound: zod.array(zod.string()),
+	rowsProcessed: zod.number(),
+});
+export const ListUploadsResponse = zod.array(ListUploadsResponseItem);
 
 /**
  * @summary List all available weeks with data
  */
 export const ListWeeksResponseItem = zod.object({
-  "week": zod.string(),
-  "year": zod.number(),
-  "label": zod.string(),
-  "totalEntries": zod.number()
-})
-export const ListWeeksResponse = zod.array(ListWeeksResponseItem)
-
+	week: zod.string(),
+	year: zod.number(),
+	label: zod.string(),
+	totalEntries: zod.number(),
+});
+export const ListWeeksResponse = zod.array(ListWeeksResponseItem);
 
 /**
  * @summary Get per-person SAP progress for a specific week
  */
 export const GetDashboardQueryParams = zod.object({
-  "week": zod.coerce.string()
-})
+	week: zod.coerce.string(),
+});
 
 export const GetDashboardResponse = zod.object({
-  "week": zod.string(),
-  "members": zod.array(zod.object({
-  "nik": zod.string(),
-  "name": zod.string(),
-  "department": zod.string(),
-  "jabatan": zod.string(),
-  "isPjo": zod.boolean(),
-  "isOnLeave": zod.boolean(),
-  "hazard": zod.object({
-  "actual": zod.number(),
-  "target": zod.number(),
-  "pct": zod.number()
-}),
-  "inspeksi": zod.object({
-  "actual": zod.number(),
-  "target": zod.number(),
-  "pct": zod.number()
-}),
-  "observasi": zod.object({
-  "actual": zod.number(),
-  "target": zod.number(),
-  "pct": zod.number()
-}),
-  "opk": zod.object({
-  "actual": zod.number(),
-  "target": zod.number(),
-  "pct": zod.number()
-}),
-  "overallPct": zod.number()
-})),
-  "summary": zod.object({
-  "totalMembers": zod.number(),
-  "fullyCompliant": zod.number(),
-  "partiallyCompliant": zod.number(),
-  "notReported": zod.number(),
-  "overallPct": zod.number()
-})
-})
-
-
+	week: zod.string(),
+	members: zod.array(
+		zod.object({
+			nik: zod.string(),
+			name: zod.string(),
+			department: zod.string(),
+			jabatan: zod.string(),
+			isPjo: zod.boolean(),
+			isHse: zod.boolean(),
+			isOnLeave: zod.boolean(),
+			tta: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			hazard: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			inspeksi: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			inspectionTimeCompliance: zod.object({
+				total: zod.number(),
+				sesuai: zod.number(),
+				tidakSesuai: zod.number(),
+				pct: zod.number().nullable(),
+			}),
+			observasi: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			opkKeberadaanPengawas: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			opkPencahayaan: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			opkFungsiPengawas: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			opkP2h: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			opkSeatbelt: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			opkSimper: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			opkRoster: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			opkFatigue: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			opkLototo: zod.object({
+				actual: zod.number(),
+				target: zod.number(),
+				pct: zod.number(),
+			}),
+			overallPct: zod.number(),
+		}),
+	),
+	summary: zod.object({
+		totalMembers: zod.number(),
+		fullyCompliant: zod.number(),
+		partiallyCompliant: zod.number(),
+		notReported: zod.number(),
+		overallPct: zod.number(),
+	}),
+});

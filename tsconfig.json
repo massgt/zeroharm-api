@@ -1,28 +1,11 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-
-    "strict": true,
-
-    "rootDir": "src",
-    "outDir": "dist",
-
-    "types": ["node"],
-
-    "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
-
-    "resolveJsonModule": true,
-
-    "skipLibCheck": true,
-
-    "incremental": true,
-    "tsBuildInfoFile": ".tsbuildinfo"
-  },
-
-  "include": [
-    "src"
-  ]
+	"compilerOptions": {
+		"incremental": true,
+		"tsBuildInfoFile": ".tsbuildinfo",
+		"outDir": "dist",
+		"rootDir": "src",
+		"types": ["node"],
+		"skipLibCheck": true
+	},
+	"include": ["src"]
 }
