@@ -1,6 +1,12 @@
 import { Router, type IRouter } from "express";
-import { eq, sql } from "drizzle-orm";
-import { db, teamMembersTable, reportEntriesTable } from "../db";
+import { eq, sql, desc, inArray, and } from "drizzle-orm";
+
+import {
+	db,
+	teamMembersTable,
+	reportEntriesTable,
+	excelUploadsTable,
+} from "../db";
 import {
 	GetDashboardQueryParams,
 	GetDashboardResponse,
@@ -29,12 +35,88 @@ router.get("/weeks", async (_req, res): Promise<void> => {
 			reportEntriesTable.week,
 		);
 
-	const weeks = rows.map((r) => ({
-		week: r.week,
-		year: r.year,
-		label: `${r.week} / ${r.year}`,
-		totalEntries: r.totalEntries,
-	}));
+	/*
+	 * Week yang sama pada bulan berbeda tetap dianggap
+	 * sebagai periode yang berbeda.
+	 *
+	 * Contoh:
+	 * 2026-08-W36
+	 * 2026-09-W36
+	 *
+	 * Keduanya tetap tersedia sebagai data periode masing-masing.
+	 */
+
+	const uniqueWeeks = new Map<
+		string,
+		{
+			week: string;
+			year: number;
+			totalEntries: number;
+		}
+	>();
+
+	for (const row of rows) {
+		const key = `${row.year}-${row.month}-${row.week}`;
+
+		if (!uniqueWeeks.has(key)) {
+			uniqueWeeks.set(key, {
+				week: row.week,
+				year: row.year,
+				totalEntries: row.totalEntries,
+			});
+		} else {
+			const existing = uniqueWeeks.get(key)!;
+
+			existing.totalEntries += row.totalEntries;
+		}
+	}
+
+	/*
+	 * Dashboard menggunakan nomor week sebagai parameter.
+	 *
+	 * Jika W36 terdapat pada Agustus dan September,
+	 * keduanya digabung sebagai satu pilihan W36.
+	 */
+	const weekSummary = new Map<
+		string,
+		{
+			week: string;
+			year: number;
+			totalEntries: number;
+		}
+	>();
+
+	for (const row of uniqueWeeks.values()) {
+		const key = `${row.week}-${row.year}`;
+
+		if (!weekSummary.has(key)) {
+			weekSummary.set(key, {
+				week: row.week,
+				year: row.year,
+				totalEntries: row.totalEntries,
+			});
+		} else {
+			const existing = weekSummary.get(key)!;
+			existing.totalEntries += row.totalEntries;
+		}
+	}
+
+	const weeks = Array.from(weekSummary.values())
+		.sort((a, b) => {
+			if (a.year !== b.year) {
+				return a.year - b.year;
+			}
+
+			return a.week.localeCompare(b.week, undefined, {
+				numeric: true,
+			});
+		})
+		.map((r) => ({
+			week: r.week,
+			year: r.year,
+			label: `${r.week} / ${r.year}`,
+			totalEntries: r.totalEntries,
+		}));
 
 	res.json(ListWeeksResponse.parse(weeks));
 });
@@ -77,37 +159,88 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 		return;
 	}
 
-	const entries = await db
+	/*
+	 * ACTIVE VERSION PERIODE
+	 *
+	 * Aturan:
+	 * - periode berbeda = versi aktif masing-masing
+	 * - upload terbaru menjadi active version
+	 * - jika satu week lintas bulan, data dari kedua bulan tetap digunakan
+	 *
+	 * Contoh W36:
+	 * 2026-08-W36 -> upload 55
+	 * 2026-09-W36 -> upload 54
+	 *
+	 * Maka dashboard W36 menggunakan keduanya.
+	 */
+
+	const rawEntries = await db
 		.select({
 			nik: reportEntriesTable.nik,
 			type: reportEntriesTable.type,
 			subType: reportEntriesTable.subType,
-			count: sql<number>`count(*)::int`,
+			uploadId: reportEntriesTable.uploadId,
+			month: reportEntriesTable.month,
+			year: reportEntriesTable.year,
+			uploadedAt: excelUploadsTable.uploadedAt,
 		})
 		.from(reportEntriesTable)
+		.innerJoin(
+			excelUploadsTable,
+			eq(reportEntriesTable.uploadId, excelUploadsTable.id),
+		)
 		.where(eq(reportEntriesTable.week, week))
-		.groupBy(
-			reportEntriesTable.nik,
-			reportEntriesTable.type,
-			reportEntriesTable.subType,
-		);
+		.orderBy(desc(excelUploadsTable.uploadedAt));
+
+	/*
+	 * Pilih upload terbaru untuk setiap periode tahun-bulan.
+	 *
+	 * W36:
+	 * - 2026-08 -> upload terbaru Agustus
+	 * - 2026-09 -> upload terbaru September
+	 *
+	 * Keduanya tetap dipertahankan karena merupakan periode berbeda.
+	 */
+	const activeUploadByPeriod = new Map<string, number>();
+
+	for (const row of rawEntries) {
+		const periodKey = `${row.year}-${row.month}`;
+
+		if (!activeUploadByPeriod.has(periodKey)) {
+			activeUploadByPeriod.set(periodKey, row.uploadId);
+		}
+	}
+
+	const activeUploadIds = new Set(activeUploadByPeriod.values());
+
+	/*
+	 * Hanya gunakan data dari active version.
+	 */
+	const entries = rawEntries
+		.filter((row) => activeUploadIds.has(row.uploadId))
+		.map((row) => ({
+			nik: row.nik,
+			type: row.type,
+			subType: row.subType,
+		}));
 
 	const inspectionTimeRows = await db
 		.select({
 			nik: reportEntriesTable.nik,
 			total: sql<number>`count(*)::int`,
 			sesuai: sql<number>`
-      count(*) FILTER (
-        WHERE ${reportEntriesTable.timeCompliance} = 'Sesuai'
-      )::int
-    `,
+			count(*) FILTER (
+				WHERE ${reportEntriesTable.timeCompliance} = 'Sesuai'
+			)::int
+		`,
 		})
 		.from(reportEntriesTable)
 		.where(
-			sql`
-      ${reportEntriesTable.week} = ${week}
-      AND ${reportEntriesTable.type} = 'inspeksi'
-    `,
+			and(
+				eq(reportEntriesTable.week, week),
+				eq(reportEntriesTable.type, "inspeksi"),
+				inArray(reportEntriesTable.uploadId, Array.from(activeUploadIds)),
+			),
 		)
 		.groupBy(reportEntriesTable.nik);
 
@@ -136,7 +269,8 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 	for (const e of entries) {
 		if (!counts[e.nik]) counts[e.nik] = {};
 		if (!counts[e.nik][e.type]) counts[e.nik][e.type] = {};
-		counts[e.nik][e.type][e.subType ?? "_"] = e.count;
+		counts[e.nik][e.type][e.subType ?? "_"] =
+			(counts[e.nik][e.type][e.subType ?? "_"] ?? 0) + 1;
 	}
 
 	function get(nik: string, type: string, subType?: string): number {

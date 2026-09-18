@@ -16,7 +16,9 @@ export const reportEntriesTable = pgTable(
 		year: integer("year").notNull(),
 		timeCompliance: text("time_compliance"),
 	},
-	(t) => [unique("uniq_report_entry").on(t.sourceId, t.type, t.subType)],
+	(t) => [
+		unique("uniq_report_entry").on(t.uploadId, t.sourceId, t.type, t.subType),
+	],
 );
 
 export const insertReportEntrySchema = createInsertSchema(
