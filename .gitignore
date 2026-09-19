@@ -5,3 +5,6 @@ dist/
 .env
 .credentials/
 credentials/
+
+# Local database backups
+*.dump
