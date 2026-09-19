@@ -1,18 +1,35 @@
 import { google } from "googleapis";
+import fs from "node:fs";
 
-const CREDENTIALS_PATH =
-	process.env.GOOGLE_APPLICATION_CREDENTIALS ??
-	"credentials/zeroharm-507213-2d45827f0d13.json";
+const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 
-const auth = new google.auth.GoogleAuth({
-	keyFile: CREDENTIALS_PATH,
-	scopes: ["https://www.googleapis.com/auth/drive.readonly"],
-});
+function getGoogleCredentials() {
+	const credentialsPath =
+		process.env.GOOGLE_SERVICE_ACCOUNT_JSON ??
+		"./credentials/zeroharm-507213-2d45827f0d13.json";
 
-const drive = google.drive({
-	version: "v3",
-	auth,
-});
+	if (!fs.existsSync(credentialsPath)) {
+		throw new Error(
+			`Google Service Account credentials not found: ${credentialsPath}`,
+		);
+	}
+
+	return JSON.parse(fs.readFileSync(credentialsPath, "utf8"));
+}
+
+function getDriveClient() {
+	const credentials = getGoogleCredentials();
+
+	const auth = new google.auth.GoogleAuth({
+		credentials,
+		scopes: [GOOGLE_DRIVE_SCOPE],
+	});
+
+	return google.drive({
+		version: "v3",
+		auth,
+	});
+}
 
 export interface GoogleDriveFileInfo {
 	id: string;
@@ -24,6 +41,8 @@ export interface GoogleDriveFileInfo {
 export async function getGoogleDriveFile(
 	fileId: string,
 ): Promise<GoogleDriveFileInfo> {
+	const drive = getDriveClient();
+
 	const response = await drive.files.get({
 		fileId,
 		fields: "id,name,mimeType,size",
@@ -47,6 +66,8 @@ export async function getGoogleDriveFile(
 export async function downloadGoogleDriveFile(
 	fileId: string,
 ): Promise<NodeJS.ReadableStream> {
+	const drive = getDriveClient();
+
 	const response = await drive.files.get(
 		{
 			fileId,
