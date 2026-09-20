@@ -6,12 +6,12 @@ import {
 	teamMembersTable,
 	reportEntriesTable,
 	excelUploadsTable,
-} from "../db";
+} from "../db/index.js";
 import {
 	GetDashboardQueryParams,
 	GetDashboardResponse,
 	ListWeeksResponse,
-} from "../api-zod";
+} from "../api-zod/index.js";
 
 const router: IRouter = Router();
 

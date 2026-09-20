@@ -4,24 +4,24 @@ import multer from "multer";
 
 import * as xlsx from "xlsx";
 
-import { db, excelUploadsTable, reportEntriesTable } from "../db";
+import { db, excelUploadsTable, reportEntriesTable } from "../db/index.js";
 
-import { ListUploadsResponse } from "../api-zod";
+import { ListUploadsResponse } from "../api-zod/index.js";
 
 import { eq, sql } from "drizzle-orm";
 
-import { getGoogleSheetValues } from "../services/google-sheets";
+import { getGoogleSheetValues } from "../services/google-sheets.js";
 
 import {
 	getGoogleDriveFile,
 	downloadGoogleDriveFile,
 	testGoogleDriveFile,
-} from "../services/google-drive";
+} from "../services/google-drive.js";
 
 import {
 	parseGoogleDriveXlsx,
 	type ParsedGoogleEntry,
-} from "../services/google-sheet-stream";
+} from "../services/google-sheet-stream.js";
 
 const router: IRouter = Router();
 const storage = multer.memoryStorage();

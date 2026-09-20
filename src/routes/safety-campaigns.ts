@@ -8,12 +8,12 @@ import { randomUUID } from "node:crypto";
 
 import { desc, eq } from "drizzle-orm";
 
-import { db } from "../db";
+import { db } from "../db/index.js";
 import {
 	safetyCampaignsTable,
 	safetyCampaignImagesTable,
 	insertSafetyCampaignSchema,
-} from "../db/schema";
+} from "../db/schema/index.js";
 
 const router = Router();
 

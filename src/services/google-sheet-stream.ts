@@ -1,7 +1,7 @@
 import ExcelJS from "exceljs";
 import type { Readable } from "node:stream";
 
-import { downloadGoogleDriveFile, getGoogleDriveFile } from "./google-drive";
+import { downloadGoogleDriveFile, getGoogleDriveFile } from "./google-drive.js";
 
 const COMPANY = "PT. Minergo Visi Maxima";
 

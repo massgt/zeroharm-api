@@ -1,5 +1,5 @@
 import { pgTable, serial, text, integer, timestamp } from "drizzle-orm/pg-core";
-import { safetyCampaignsTable } from "./safety-campaigns";
+import { safetyCampaignsTable } from "./safety-campaigns.js";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
