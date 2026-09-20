@@ -17,44 +17,12 @@ import {
 const router: IRouter = Router();
 
 router.get("/members", async (_req, res): Promise<void> => {
-	try {
-		const members = await db
-			.select()
-			.from(teamMembersTable)
-			.orderBy(teamMembersTable.name);
+	const members = await db
+		.select()
+		.from(teamMembersTable)
+		.orderBy(teamMembersTable.name);
 
-		res.json(ListMembersResponse.parse(members));
-	} catch (error) {
-		const err = error as Error & {
-			cause?: {
-				name?: string;
-				message?: string;
-				code?: string;
-				errno?: string | number;
-				severity?: string;
-				detail?: string;
-				hint?: string;
-			};
-		};
-
-		console.error("MEMBERS_DB_ERROR", {
-			name: err.name,
-			message: err.message,
-			cause: err.cause
-				? {
-						name: err.cause.name,
-						message: err.cause.message,
-						code: err.cause.code,
-						errno: err.cause.errno,
-						severity: err.cause.severity,
-						detail: err.cause.detail,
-						hint: err.cause.hint,
-					}
-				: undefined,
-		});
-
-		res.status(500).json({ error: "Database query failed" });
-	}
+	res.json(ListMembersResponse.parse(members));
 });
 
 router.post("/members", async (req, res): Promise<void> => {
