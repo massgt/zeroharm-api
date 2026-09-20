@@ -10,7 +10,19 @@ if (!process.env.DATABASE_URL) {
 	);
 }
 
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+export const pool = new Pool({
+	connectionString: process.env.DATABASE_URL,
+});
+
+pool.on("error", (error) => {
+	console.error("PG_POOL_ERROR", {
+		name: error.name,
+		message: error.message,
+		code: (error as NodeJS.ErrnoException).code,
+		errno: (error as NodeJS.ErrnoException).errno,
+	});
+});
+
 export const db = drizzle(pool, { schema });
 
 export * from "./schema/index.js";
