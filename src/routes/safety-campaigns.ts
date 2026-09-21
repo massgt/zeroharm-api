@@ -1,10 +1,12 @@
 import { Router } from "express";
 
 import multer from "multer";
-
-import path from "node:path";
-
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import {
+	uploadSafetyCampaignImage,
+	deleteSafetyCampaignImage,
+} from "../services/supabase-storage.js";
 
 import { desc, eq } from "drizzle-orm";
 
@@ -17,20 +19,8 @@ import {
 
 const router = Router();
 
-const campaignUploadStorage = multer.diskStorage({
-	destination: (_req, _file, cb) => {
-		cb(null, path.resolve("uploads/safety-campaigns"));
-	},
-
-	filename: (_req, file, cb) => {
-		const extension = path.extname(file.originalname).toLowerCase();
-
-		cb(null, `${randomUUID()}${extension}`);
-	},
-});
-
 const campaignUpload = multer({
-	storage: campaignUploadStorage,
+	storage: multer.memoryStorage(),
 
 	limits: {
 		fileSize: 10 * 1024 * 1024,
@@ -167,16 +157,35 @@ router.post(
 
 			const startSortOrder = existingImages.length;
 
+			const uploadedImages = [];
+
+			for (let index = 0; index < files.length; index++) {
+				const file = files[index];
+
+				const extension = path.extname(file.originalname).toLowerCase();
+
+				const storagePath = [
+					`campaign-${campaignId}`,
+					`${Date.now()}-${randomUUID()}${extension}`,
+				].join("/");
+
+				const uploaded = await uploadSafetyCampaignImage({
+					path: storagePath,
+					buffer: file.buffer,
+					contentType: file.mimetype,
+				});
+
+				uploadedImages.push({
+					campaignId,
+					filename: file.originalname,
+					filePath: uploaded.publicUrl,
+					sortOrder: startSortOrder + index,
+				});
+			}
+
 			const insertedImages = await db
 				.insert(safetyCampaignImagesTable)
-				.values(
-					files.map((file, index) => ({
-						campaignId,
-						filename: file.originalname,
-						filePath: `/uploads/safety-campaigns/${file.filename}`,
-						sortOrder: startSortOrder + index,
-					})),
-				)
+				.values(uploadedImages)
 				.returning();
 
 			res.status(201).json({
@@ -376,23 +385,26 @@ router.delete(
 				return;
 			}
 
+			const storageUrlMarker = "/storage/v1/object/public/safety-campaigns/";
+
+			if (image.filePath.includes(storageUrlMarker)) {
+				const storagePath = image.filePath.split(storageUrlMarker)[1];
+
+				if (storagePath) {
+					try {
+						await deleteSafetyCampaignImage(storagePath);
+					} catch (storageError) {
+						console.error(
+							"Failed to delete campaign image from Supabase Storage:",
+							storageError,
+						);
+					}
+				}
+			}
+
 			await db
 				.delete(safetyCampaignImagesTable)
 				.where(eq(safetyCampaignImagesTable.id, imageId));
-
-			// Hapus file fisik
-			const fs = await import("node:fs/promises");
-
-			const relativePath = image.filePath.replace(/^\/uploads\//, "");
-			const physicalPath = path.resolve("uploads", relativePath);
-
-			try {
-				await fs.unlink(physicalPath);
-			} catch (fileError: any) {
-				if (fileError?.code !== "ENOENT") {
-					console.error("Failed to delete campaign image file:", fileError);
-				}
-			}
 
 			res.json({
 				success: true,
@@ -442,20 +454,27 @@ router.delete("/:id", async (req, res): Promise<void> => {
 			.from(safetyCampaignImagesTable)
 			.where(eq(safetyCampaignImagesTable.campaignId, campaignId));
 
-		// 3. Hapus file fisik poster
-		const fs = await import("node:fs/promises");
+		// 3. Hapus seluruh poster dari Supabase Storage
+		const storageUrlMarker = "/storage/v1/object/public/safety-campaigns/";
 
 		for (const image of images) {
-			const relativePath = image.filePath.replace(/^\/uploads\//, "");
+			if (!image.filePath.includes(storageUrlMarker)) {
+				continue;
+			}
 
-			const physicalPath = path.resolve("uploads", relativePath);
+			const storagePath = image.filePath.split(storageUrlMarker)[1];
+
+			if (!storagePath) {
+				continue;
+			}
 
 			try {
-				await fs.unlink(physicalPath);
-			} catch (fileError: any) {
-				if (fileError?.code !== "ENOENT") {
-					console.error("Failed to delete campaign image file:", fileError);
-				}
+				await deleteSafetyCampaignImage(storagePath);
+			} catch (storageError) {
+				console.error(
+					"Failed to delete campaign image from Supabase Storage:",
+					storageError,
+				);
 			}
 		}
 
