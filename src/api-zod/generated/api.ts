@@ -195,6 +195,7 @@ export const ListUploadsResponseItem = zod.object({
 	uploadedAt: zod.coerce.date(),
 	weeksFound: zod.array(zod.string()),
 	rowsProcessed: zod.number(),
+	sourceType: zod.enum(["manual", "google_sheet"]),
 });
 export const ListUploadsResponse = zod.array(ListUploadsResponseItem);
 

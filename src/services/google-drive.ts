@@ -4,17 +4,23 @@ import fs from "node:fs";
 const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 
 function getGoogleCredentials() {
-	const credentialsPath =
-		process.env.GOOGLE_SERVICE_ACCOUNT_JSON ??
-		"./credentials/zeroharm-507213-2d45827f0d13.json";
+	const credentialsValue = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
 
-	if (!fs.existsSync(credentialsPath)) {
+	if (!credentialsValue) {
+		throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not configured");
+	}
+
+	if (credentialsValue.trim().startsWith("{")) {
+		return JSON.parse(credentialsValue);
+	}
+
+	if (!fs.existsSync(credentialsValue)) {
 		throw new Error(
-			`Google Service Account credentials not found: ${credentialsPath}`,
+			`Google Service Account credentials not found: ${credentialsValue}`,
 		);
 	}
 
-	return JSON.parse(fs.readFileSync(credentialsPath, "utf8"));
+	return JSON.parse(fs.readFileSync(credentialsValue, "utf8"));
 }
 
 function getDriveClient() {
