@@ -98,11 +98,63 @@ export async function appendExcelChunkToFile(params: {
 export async function deleteExcelChunks(paths: string[]) {
 	if (paths.length === 0) return;
 
-	const { error } = await supabase.storage.from(BUCKET_NAME).remove(paths);
+	const storage = supabase.storage.from(BUCKET_NAME);
 
-	if (error) {
-		throw new Error(
-			`Failed to delete Excel chunks from Supabase Storage: ${error.message}`,
-		);
+	for (let attempt = 1; attempt <= 3; attempt++) {
+		const { error } = await storage.remove(paths);
+
+		if (error) {
+			if (attempt === 3) {
+				throw new Error(
+					`Failed to delete Excel chunks from Supabase Storage: ${error.message}`,
+				);
+			}
+
+			await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+			continue;
+		}
+
+		const remainingPaths: string[] = [];
+
+		for (const path of paths) {
+			const lastSlash = path.lastIndexOf("/");
+			const folder = path.slice(0, lastSlash);
+			const filename = path.slice(lastSlash + 1);
+
+			const { data, error: listError } = await storage.list(folder, {
+				limit: 100,
+			});
+
+			if (listError) {
+				if (attempt === 3) {
+					throw new Error(
+						`Failed to verify deleted Excel chunk: ${listError.message}`,
+					);
+				}
+
+				remainingPaths.push(path);
+				continue;
+			}
+
+			const stillExists = data.some((file) => file.name === filename);
+
+			if (stillExists) {
+				remainingPaths.push(path);
+			}
+		}
+
+		if (remainingPaths.length === 0) {
+			return;
+		}
+
+		paths = remainingPaths;
+
+		if (attempt < 3) {
+			await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+		}
 	}
+
+	throw new Error(
+		`Failed to cleanup Excel chunks after 3 attempts: ${paths.join(", ")}`,
+	);
 }
