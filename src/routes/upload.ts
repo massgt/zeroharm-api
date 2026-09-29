@@ -137,12 +137,18 @@ function excelDateToYear(val: unknown): number {
 	}
 
 	if (typeof val === "number") {
-		const d = xlsx.SSF.parse_date_code(val);
-		return d?.y ?? new Date().getFullYear();
+		const excelEpoch = Date.UTC(1899, 11, 30);
+		const date = new Date(excelEpoch + val * 24 * 60 * 60 * 1000);
+
+		return date.getUTCFullYear();
 	}
 
 	if (typeof val === "string") {
-		return new Date(val).getFullYear() || new Date().getFullYear();
+		const parsed = new Date(val);
+
+		if (!Number.isNaN(parsed.getTime())) {
+			return parsed.getFullYear();
+		}
 	}
 
 	return new Date().getFullYear();
