@@ -11,11 +11,13 @@ function getGoogleCredentials() {
 	}
 
 	// Production: credential JSON disimpan langsung di environment variable.
+
 	if (credentialsValue.trim().startsWith("{")) {
 		return JSON.parse(credentialsValue);
 	}
 
 	// Local DEV: environment variable menunjuk ke file JSON.
+
 	if (!fs.existsSync(credentialsValue)) {
 		throw new Error(
 			`Google Service Account credentials not found: ${credentialsValue}`,

@@ -4,6 +4,10 @@ import multer from "multer";
 
 import * as xlsx from "xlsx";
 
+import ExcelJS from "exceljs";
+
+import fs from "node:fs/promises";
+
 import { db, excelUploadsTable, reportEntriesTable } from "../db/index.js";
 
 import { ListUploadsResponse } from "../api-zod/index.js";
@@ -23,9 +27,25 @@ import {
 	type ParsedGoogleEntry,
 } from "../services/google-sheet-stream.js";
 
+import {
+	appendExcelChunkToFile,
+	createExcelChunkUploadUrl,
+	deleteExcelChunks,
+} from "../services/supabase-excel-storage.js";
+
 const router: IRouter = Router();
-const storage = multer.memoryStorage();
-const upload = multer({ storage, limits: { fileSize: 200 * 1024 * 1024 } });
+const storage = multer.diskStorage({
+	destination: "/tmp",
+	filename: (_req, file, cb) => {
+		const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+		cb(null, `${Date.now()}-${safeName}`);
+	},
+});
+
+const upload = multer({
+	storage,
+	limits: { fileSize: 200 * 1024 * 1024 },
+});
 
 const COMPANY = "PT. Minergo Visi Maxima";
 
@@ -112,13 +132,25 @@ async function downloadGoogleSheetTab(
 }
 
 function excelDateToYear(val: unknown): number {
+	if (val instanceof Date) {
+		return val.getFullYear();
+	}
+
 	if (typeof val === "number") {
-		const d = xlsx.SSF.parse_date_code(val);
-		return d?.y ?? new Date().getFullYear();
+		const excelEpoch = Date.UTC(1899, 11, 30);
+		const date = new Date(excelEpoch + val * 24 * 60 * 60 * 1000);
+
+		return date.getUTCFullYear();
 	}
+
 	if (typeof val === "string") {
-		return new Date(val).getFullYear() || new Date().getFullYear();
+		const parsed = new Date(val);
+
+		if (!Number.isNaN(parsed.getTime())) {
+			return parsed.getFullYear();
+		}
 	}
+
 	return new Date().getFullYear();
 }
 
@@ -187,207 +219,197 @@ function normalizeOPKSubType(value: unknown): OPKSubType | undefined {
 	return undefined;
 }
 
-function parseExcel(buffer: Buffer): {
+async function parseExcelStreaming(
+	filePath: string,
+	onEntry?: (entry: ParsedEntry) => Promise<void> | void,
+): Promise<{
 	entries: ParsedEntry[];
 	rowsProcessed: number;
-} {
-	const wb = xlsx.read(buffer, {
-		type: "buffer",
-		cellStyles: false,
-		cellHTML: false,
-		cellFormula: false,
-		cellNF: false,
-		cellDates: false,
-	});
+}> {
 	const entries: ParsedEntry[] = [];
 	let rowsProcessed = 0;
 
-	// --- HAZARD ---
-	// Columns: [0]ID, [2]NIK, [6]Perusahaan, [22]Tanggal, [31]Week, [32]Month
-	const hazardWs = wb.Sheets["Hazard"];
+	const workbook = new ExcelJS.stream.xlsx.WorkbookReader(filePath, {
+		entries: "ignore",
+		sharedStrings: "cache",
+		styles: "ignore",
+		hyperlinks: "ignore",
+		worksheets: "emit",
+	});
 
-	if (hazardWs) {
-		const rows = xlsx.utils.sheet_to_json<unknown[]>(hazardWs, {
-			header: 1,
-			defval: "",
-		});
+	let worksheetIndex = 0;
 
-		for (let i = 1; i < rows.length; i++) {
-			const r = rows[i] as unknown[];
+	for await (const worksheet of workbook) {
+		const sheetNames = ["Hazard", "Inspeksi", "Observasi", "OPK"] as const;
+		const sheetName = sheetNames[worksheetIndex++];
 
-			if (String(r[6] ?? "").trim() !== COMPANY) continue;
+		if (!sheetName) {
+			continue;
+		}
 
-			const nik = String(r[2] ?? "").trim();
-			if (!nik) continue;
+		let isHeader = true;
 
-			const week = String(r[31] ?? "").trim();
-			const month = Number(r[32]) || 0;
-			const year = excelDateToYear(r[22]);
+		for await (const row of worksheet) {
+			if (isHeader) {
+				isHeader = false;
+				continue;
+			}
 
-			const sourceId = String(r[0] ?? "").trim();
+			const r: unknown[] = [];
 
-			if (!sourceId || !week) continue;
+			for (let i = 1; i <= row.cellCount; i++) {
+				const cell = row.getCell(i);
+				r[i - 1] = cell.value ?? "";
+			}
 
-			entries.push({
-				sourceId: `haz_${sourceId}`,
-				type: "hazard",
-				nik,
-				week,
-				month,
-				year,
-			});
+			let entry: ParsedEntry | undefined;
 
-			const jenisTemuan = String(r[15] ?? "")
-				.trim()
-				.toUpperCase();
+			if (sheetName === "Hazard") {
+				if (String(r[6] ?? "").trim() !== COMPANY) continue;
 
-			if (jenisTemuan === "TTA") {
-				entries.push({
-					sourceId: `tta_${sourceId}`,
-					type: "tta",
+				const nik = String(r[2] ?? "").trim();
+				if (!nik) continue;
+
+				const week = String(r[31] ?? "").trim();
+				const month = Number(r[32]) || 0;
+				const year = excelDateToYear(r[22]);
+				const sourceId = String(r[0] ?? "").trim();
+
+				if (!sourceId || !week) continue;
+
+				entry = {
+					sourceId: `haz_${sourceId}`,
+					type: "hazard",
 					nik,
 					week,
 					month,
 					year,
-				});
+				};
+
+				await onEntry?.(entry);
+				entries.push(entry);
+
+				const jenisTemuan = String(r[15] ?? "")
+					.trim()
+					.toUpperCase();
+
+				if (jenisTemuan === "TTA") {
+					const ttaEntry: ParsedEntry = {
+						sourceId: `tta_${sourceId}`,
+						type: "tta",
+						nik,
+						week,
+						month,
+						year,
+					};
+
+					await onEntry?.(ttaEntry);
+					entries.push(ttaEntry);
+				}
+
+				rowsProcessed++;
+				continue;
 			}
 
-			rowsProcessed++;
-		}
-	}
+			if (sheetName === "Inspeksi") {
+				if (String(r[4] ?? "").trim() !== COMPANY) continue;
 
-	// --- INSPEKSI ---
-	// Columns: [2]NIK, [4]Perusahaan, [6]ID, [16]Tanggal, [22]Week, [23]Month
-	// Columns:
-	// [2] NIK
-	// [4] Perusahaan
-	// [6] ID
-	// [16] Tanggal
-	// [22] Week
-	// [23] Month
-	// [25] Status Kesesuaian Waktu (kolom Z)
-	const inspWs = wb.Sheets["Inspeksi"];
-	if (inspWs) {
-		const rows = xlsx.utils.sheet_to_json<unknown[]>(inspWs, {
-			header: 1,
-			defval: "",
-		});
-		for (let i = 1; i < rows.length; i++) {
-			const r = rows[i] as unknown[];
-			if (String(r[4] ?? "").trim() !== COMPANY) continue;
-			const nik = String(r[2] ?? "").trim();
-			if (!nik) continue;
-			const week = String(r[22] ?? "").trim();
-			const month = Number(r[23]) || 0;
-			const year = excelDateToYear(r[16]);
-			const sourceId = String(r[6] ?? "").trim();
-			const timeCompliance = String(r[25] ?? "").trim();
+				const nik = String(r[2] ?? "").trim();
+				if (!nik) continue;
 
-			if (!sourceId || !week) continue;
+				const week = String(r[22] ?? "").trim();
+				const month = Number(r[23]) || 0;
+				const year = excelDateToYear(r[16]);
+				const sourceId = String(r[6] ?? "").trim();
+				const timeCompliance = String(r[25] ?? "").trim();
 
-			entries.push({
-				sourceId: `ins_${sourceId}`,
-				type: "inspeksi",
-				nik,
-				week,
-				month,
-				year,
-				timeCompliance: timeCompliance || undefined,
-			});
-			rowsProcessed++;
-		}
-	}
+				if (!sourceId || !week) continue;
 
-	// --- OBSERVASI ---
-	// Columns: [0]ID, [5]Tanggal, [18]NIK, [22]Perusahaan, [23]Week, [24]Month
-	const obsWs = wb.Sheets["Observasi"];
-	if (obsWs) {
-		const rows = xlsx.utils.sheet_to_json<unknown[]>(obsWs, {
-			header: 1,
-			defval: "",
-		});
-		for (let i = 1; i < rows.length; i++) {
-			const r = rows[i] as unknown[];
-			if (String(r[22] ?? "").trim() !== COMPANY) continue;
-			const nik = String(r[18] ?? "").trim();
-			if (!nik) continue;
-			const week = String(r[23] ?? "").trim();
-			const month = Number(r[24]) || 0;
-			const year = excelDateToYear(r[5]);
-			const sourceId = String(r[0] ?? "").trim();
-			if (!sourceId || !week) continue;
-			entries.push({
-				sourceId: `obs_${sourceId}`,
-				type: "observasi",
-				nik,
-				week,
-				month,
-				year,
-			});
-			rowsProcessed++;
-		}
-	}
+				entry = {
+					sourceId: `ins_${sourceId}`,
+					type: "inspeksi",
+					nik,
+					week,
+					month,
+					year,
+					timeCompliance: timeCompliance || undefined,
+				};
 
-	// --- OPK ---
-	const opkWs = wb.Sheets["OPK"];
+				await onEntry?.(entry);
+				entries.push(entry);
 
-	if (opkWs) {
-		const rows = xlsx.utils.sheet_to_json<unknown[]>(opkWs, {
-			header: 1,
-			defval: "",
-		});
+				rowsProcessed++;
+				continue;
+			}
 
-		for (let i = 1; i < rows.length; i++) {
-			const r = rows[i] as unknown[];
+			if (sheetName === "Observasi") {
+				if (String(r[22] ?? "").trim() !== COMPANY) continue;
 
-			// D = Company
-			if (String(r[3] ?? "").trim() !== COMPANY) continue;
+				const nik = String(r[18] ?? "").trim();
+				if (!nik) continue;
 
-			// C = NIK
-			const nik = String(r[2] ?? "").trim();
+				const week = String(r[23] ?? "").trim();
+				const month = Number(r[24]) || 0;
+				const year = excelDateToYear(r[5]);
+				const sourceId = String(r[0] ?? "").trim();
 
-			if (!nik) continue;
+				if (!sourceId || !week) continue;
 
-			// S = Week
-			const week = String(r[18] ?? "").trim();
+				entry = {
+					sourceId: `obs_${sourceId}`,
+					type: "observasi",
+					nik,
+					week,
+					month,
+					year,
+				};
 
-			if (!week) continue;
+				await onEntry?.(entry);
+				entries.push(entry);
 
-			// T = Month
-			const month = Number(r[19]) || 0;
+				rowsProcessed++;
+				continue;
+			}
 
-			// Q = Date
-			const year = excelDateToYear(r[16]);
+			if (sheetName === "OPK") {
+				if (String(r[3] ?? "").trim() !== COMPANY) continue;
 
-			// A = ID
-			const sourceId = String(r[0] ?? "").trim();
+				const nik = String(r[2] ?? "").trim();
+				if (!nik) continue;
 
-			if (!sourceId) continue;
+				const week = String(r[18] ?? "").trim();
+				if (!week) continue;
 
-			// P = Jenis Pekerjaan
-			const jenisPekerjaan = String(r[15] ?? "").trim();
+				const month = Number(r[19]) || 0;
+				const year = excelDateToYear(r[16]);
+				const sourceId = String(r[0] ?? "").trim();
 
-			// R = Status
-			const status = Number(r[17]) || 0;
+				if (!sourceId) continue;
 
-			// Hanya status=1 seperti Excel BIB
-			if (status !== 1) continue;
+				const jenisPekerjaan = String(r[15] ?? "").trim();
+				const status = Number(r[17]) || 0;
 
-			const subType = normalizeOPKSubType(jenisPekerjaan);
+				if (status !== 1) continue;
 
-			if (!subType) continue;
+				const subType = normalizeOPKSubType(jenisPekerjaan);
 
-			entries.push({
-				sourceId: `opk_${sourceId}`,
-				type: "opk",
-				subType,
-				nik,
-				week,
-				month,
-				year,
-			});
+				if (!subType) continue;
 
-			rowsProcessed++;
+				entry = {
+					sourceId: `opk_${sourceId}`,
+					type: "opk",
+					subType,
+					nik,
+					week,
+					month,
+					year,
+				};
+
+				await onEntry?.(entry);
+				entries.push(entry);
+
+				rowsProcessed++;
+			}
 		}
 	}
 
@@ -1117,6 +1139,154 @@ router.post("/upload/google-sheet", async (req, res): Promise<void> => {
 	}
 });
 
+router.post("/upload/excel-chunk-url", async (req, res): Promise<void> => {
+	try {
+		const body = req.body as {
+			sessionId?: string;
+			chunkIndex?: number;
+		};
+
+		const sessionId = String(body.sessionId ?? "").trim();
+		const chunkIndex = Number(body.chunkIndex);
+
+		if (!sessionId || !/^[a-f0-9-]{36}$/i.test(sessionId)) {
+			res.status(400).json({
+				error: "Invalid sessionId",
+			});
+			return;
+		}
+
+		if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+			res.status(400).json({
+				error: "Invalid chunkIndex",
+			});
+			return;
+		}
+
+		const path = `excel/${sessionId}/${chunkIndex}.part`;
+
+		const result = await createExcelChunkUploadUrl(path);
+
+		res.json({
+			signedUrl: result.signedUrl,
+		});
+	} catch (err) {
+		req.log.error({ err }, "Failed to create Excel chunk upload URL");
+
+		res.status(500).json({
+			error: String(err),
+		});
+	}
+});
+
+router.post("/upload/excel-chunked", async (req, res): Promise<void> => {
+	let tempFilePath: string | undefined;
+	let chunkPaths: string[] = [];
+
+	try {
+		const body = req.body as {
+			filename?: string;
+			sessionId?: string;
+			totalChunks?: number;
+		};
+
+		const filename = String(body.filename ?? "").trim();
+		const sessionId = String(body.sessionId ?? "").trim();
+		const totalChunks = Number(body.totalChunks);
+
+		if (!filename) {
+			res.status(400).json({
+				error: "filename is required",
+			});
+			return;
+		}
+
+		if (!sessionId || !/^[a-f0-9-]{36}$/i.test(sessionId)) {
+			res.status(400).json({
+				error: "Invalid sessionId",
+			});
+			return;
+		}
+
+		if (
+			!Number.isInteger(totalChunks) ||
+			totalChunks < 1 ||
+			totalChunks > 100
+		) {
+			res.status(400).json({
+				error: "Invalid totalChunks",
+			});
+			return;
+		}
+
+		chunkPaths = Array.from(
+			{ length: totalChunks },
+			(_, index) => `excel/${sessionId}/${index}.part`,
+		);
+
+		const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+
+		tempFilePath = `/tmp/${Date.now()}-${safeFilename}`;
+
+		req.log.info(
+			{
+				filename,
+				sessionId,
+				totalChunks,
+			},
+			"Processing chunked Excel upload",
+		);
+
+		for (let i = 0; i < chunkPaths.length; i++) {
+			await appendExcelChunkToFile({
+				path: chunkPaths[i],
+				outputPath: tempFilePath,
+				truncate: i === 0,
+			});
+		}
+
+		const { entries, rowsProcessed } = await parseExcelStreaming(tempFilePath);
+
+		const result = await saveParsedEntries(entries, rowsProcessed, {
+			filename,
+			sourceType: "manual",
+		});
+
+		req.log.info(
+			{
+				uploadId: result.uploadId,
+				minergoRows: result.minergoRows,
+				weeks: result.weeksFound,
+			},
+			"Chunked Excel upload processed",
+		);
+
+		res.json({
+			success: true,
+			uploadId: result.uploadId,
+			weeksFound: result.weeksFound,
+			rowsProcessed: result.rowsProcessed,
+			minergoRows: result.minergoRows,
+		});
+	} catch (err) {
+		req.log.error({ err }, "Chunked Excel upload failed");
+
+		res.status(500).json({
+			error: String(err),
+		});
+	} finally {
+		if (chunkPaths.length > 0) {
+			await deleteExcelChunks(chunkPaths).catch((cleanupError) => {
+				req.log.error({ err: cleanupError }, "Failed to cleanup Excel chunks");
+			});
+		}
+
+		if (tempFilePath) {
+			await fs.unlink(tempFilePath).catch(() => {});
+		}
+	}
+});
+
 router.post(
 	"/upload",
 	upload.single("file"),
@@ -1134,7 +1304,9 @@ router.post(
 				"Processing Excel upload",
 			);
 
-			const { entries, rowsProcessed } = parseExcel(req.file.buffer);
+			const { entries, rowsProcessed } = await parseExcelStreaming(
+				req.file.path,
+			);
 
 			const result = await saveParsedEntries(entries, rowsProcessed, {
 				filename: req.file.originalname,
@@ -1159,10 +1331,13 @@ router.post(
 		} catch (err) {
 			console.error("UPLOAD ERROR");
 			console.error(err);
-
 			res.status(500).json({
 				error: String(err),
 			});
+		} finally {
+			if (req.file?.path) {
+				await fs.unlink(req.file.path).catch(() => {});
+			}
 		}
 	},
 );
