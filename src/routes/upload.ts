@@ -27,6 +27,12 @@ import {
 	type ParsedGoogleEntry,
 } from "../services/google-sheet-stream.js";
 
+import {
+	appendExcelChunkToFile,
+	createExcelChunkUploadUrl,
+	deleteExcelChunks,
+} from "../services/supabase-excel-storage.js";
+
 const router: IRouter = Router();
 const storage = multer.diskStorage({
 	destination: "/tmp",
@@ -1124,6 +1130,154 @@ router.post("/upload/google-sheet", async (req, res): Promise<void> => {
 		res.status(500).json({
 			error: String(err),
 		});
+	}
+});
+
+router.post("/upload/excel-chunk-url", async (req, res): Promise<void> => {
+	try {
+		const body = req.body as {
+			sessionId?: string;
+			chunkIndex?: number;
+		};
+
+		const sessionId = String(body.sessionId ?? "").trim();
+		const chunkIndex = Number(body.chunkIndex);
+
+		if (!sessionId || !/^[a-f0-9-]{36}$/i.test(sessionId)) {
+			res.status(400).json({
+				error: "Invalid sessionId",
+			});
+			return;
+		}
+
+		if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+			res.status(400).json({
+				error: "Invalid chunkIndex",
+			});
+			return;
+		}
+
+		const path = `excel/${sessionId}/${chunkIndex}.part`;
+
+		const result = await createExcelChunkUploadUrl(path);
+
+		res.json({
+			signedUrl: result.signedUrl,
+		});
+	} catch (err) {
+		req.log.error({ err }, "Failed to create Excel chunk upload URL");
+
+		res.status(500).json({
+			error: String(err),
+		});
+	}
+});
+
+router.post("/upload/excel-chunked", async (req, res): Promise<void> => {
+	let tempFilePath: string | undefined;
+	let chunkPaths: string[] = [];
+
+	try {
+		const body = req.body as {
+			filename?: string;
+			sessionId?: string;
+			totalChunks?: number;
+		};
+
+		const filename = String(body.filename ?? "").trim();
+		const sessionId = String(body.sessionId ?? "").trim();
+		const totalChunks = Number(body.totalChunks);
+
+		if (!filename) {
+			res.status(400).json({
+				error: "filename is required",
+			});
+			return;
+		}
+
+		if (!sessionId || !/^[a-f0-9-]{36}$/i.test(sessionId)) {
+			res.status(400).json({
+				error: "Invalid sessionId",
+			});
+			return;
+		}
+
+		if (
+			!Number.isInteger(totalChunks) ||
+			totalChunks < 1 ||
+			totalChunks > 100
+		) {
+			res.status(400).json({
+				error: "Invalid totalChunks",
+			});
+			return;
+		}
+
+		chunkPaths = Array.from(
+			{ length: totalChunks },
+			(_, index) => `excel/${sessionId}/${index}.part`,
+		);
+
+		const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+
+		tempFilePath = `/tmp/${Date.now()}-${safeFilename}`;
+
+		req.log.info(
+			{
+				filename,
+				sessionId,
+				totalChunks,
+			},
+			"Processing chunked Excel upload",
+		);
+
+		for (let i = 0; i < chunkPaths.length; i++) {
+			await appendExcelChunkToFile({
+				path: chunkPaths[i],
+				outputPath: tempFilePath,
+				truncate: i === 0,
+			});
+		}
+
+		const { entries, rowsProcessed } = await parseExcelStreaming(tempFilePath);
+
+		const result = await saveParsedEntries(entries, rowsProcessed, {
+			filename,
+			sourceType: "manual",
+		});
+
+		req.log.info(
+			{
+				uploadId: result.uploadId,
+				minergoRows: result.minergoRows,
+				weeks: result.weeksFound,
+			},
+			"Chunked Excel upload processed",
+		);
+
+		res.json({
+			success: true,
+			uploadId: result.uploadId,
+			weeksFound: result.weeksFound,
+			rowsProcessed: result.rowsProcessed,
+			minergoRows: result.minergoRows,
+		});
+	} catch (err) {
+		req.log.error({ err }, "Chunked Excel upload failed");
+
+		res.status(500).json({
+			error: String(err),
+		});
+	} finally {
+		if (chunkPaths.length > 0) {
+			await deleteExcelChunks(chunkPaths).catch((cleanupError) => {
+				req.log.error({ err: cleanupError }, "Failed to cleanup Excel chunks");
+			});
+		}
+
+		if (tempFilePath) {
+			await fs.unlink(tempFilePath).catch(() => {});
+		}
 	}
 });
 
