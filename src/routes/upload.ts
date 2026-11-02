@@ -18,7 +18,7 @@ import {
 
 import { ListUploadsResponse } from "../api-zod/index.js";
 
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 import { getGoogleSheetValues } from "../services/google-sheets.js";
 
@@ -736,6 +736,22 @@ async function parseGoogleSheet(spreadsheetId: string): Promise<{
 	};
 }
 
+function logUploadStage(
+	stage: string,
+	startedAt: number,
+	details: Record<string, unknown> = {},
+) {
+	console.log(
+		JSON.stringify({
+			scope: "google_sheet_upload",
+			stage,
+			durationMs: Math.round(performance.now() - startedAt),
+			timestamp: new Date().toISOString(),
+			...details,
+		}),
+	);
+}
+
 async function saveGoogleSheetData(
 	spreadsheetId: string,
 	sourceUrl: string,
@@ -749,10 +765,27 @@ async function saveGoogleSheetData(
 	// ==========================================
 	// 1. PARSE GOOGLE SHEETS
 	// ==========================================
+	const totalStartedAt = performance.now();
+
+	// 1. PARSE GOOGLE SHEETS
+	const parseStartedAt = performance.now();
+
+	logUploadStage("google_sheet_parse_started", parseStartedAt, {
+		spreadsheetId,
+	});
+
 	const entries: ParsedEntry[] = [];
 
 	const result = await parseGoogleDriveXlsx(spreadsheetId, (entry) => {
 		entries.push(convertGoogleEntry(entry));
+	});
+
+	logUploadStage("google_sheet_parse_completed", parseStartedAt, {
+		spreadsheetId,
+		sapEntries: entries.length,
+		attendanceEntries: result.attendanceEntries.length,
+		rowsProcessed: result.rowsProcessed,
+		sheetsProcessed: result.sheetsProcessed,
 	});
 
 	// ==========================================
@@ -768,6 +801,14 @@ async function saveGoogleSheetData(
 	// 3. SIMPAN SAP + ATTENDANCE
 	//    MENGGUNAKAN FUNGSI YANG SAMA
 	// ==========================================
+	const saveStartedAt = performance.now();
+
+	logUploadStage("google_sheet_save_started", saveStartedAt, {
+		spreadsheetId,
+		sapEntries: entries.length,
+		attendanceEntries: result.attendanceEntries.length,
+	});
+
 	const saveResult = await saveParsedEntries(
 		entries,
 		result.rowsProcessed,
@@ -780,9 +821,20 @@ async function saveGoogleSheetData(
 		result.attendanceEntries,
 	);
 
+	logUploadStage("google_sheet_save_completed", saveStartedAt, {
+		spreadsheetId,
+		uploadId: saveResult.uploadId,
+		sapRows: saveResult.minergoRows,
+		attendanceRows: saveResult.attendanceRows,
+	});
+
 	// ==========================================
 	// 4. RESPONSE
 	// ==========================================
+	logUploadStage("google_sheet_upload_completed", totalStartedAt, {
+		spreadsheetId,
+		uploadId: saveResult.uploadId,
+	});
 	return {
 		uploadId: saveResult.uploadId,
 		entries: saveResult.minergoRows,
@@ -801,41 +853,17 @@ async function reconcileBeforeUpload(
 		sourceId?: string;
 	},
 ) {
-	if (deduped.length === 0) {
-		return;
-	}
+	if (deduped.length === 0) return;
 
-	/*
-	 * ============================================================
-	 * ACTIVE VERSION RULE
-	 * ============================================================
-	 *
-	 * Periode ditentukan dari YEAR + MONTH.
-	 *
-	 * Contoh:
-	 * 2026-08 = Agustus
-	 * 2026-09 = September
-	 *
-	 * Jika upload baru mempunyai periode yang lebih baru:
-	 * - data periode lama diganti
-	 * - tetapi week lintas bulan tetap dipertahankan
-	 *
-	 * Jika upload baru mempunyai periode yang sama:
-	 * - upload lama pada periode tersebut diganti
-	 *
-	 * Jika upload baru lebih lama:
-	 * - upload yang lebih baru tidak disentuh
-	 */
-
-	const newPeriods = new Set(
-		deduped.map((entry) => entry.year * 100 + entry.month),
+	const newLatestPeriod = deduped.reduce(
+		(max, entry) => Math.max(max, entry.year * 100 + entry.month),
+		Number.NEGATIVE_INFINITY,
 	);
 
-	const newLatestPeriod = Math.max(...newPeriods);
+	const newWeeks = [...new Set(weeksFound)];
 
-	const newWeeks = new Set(weeksFound);
-
-	const previousUploads = await db
+	// Ambil metadata upload melalui transaksi yang sama.
+	const previousUploads = await tx
 		.select({
 			id: excelUploadsTable.id,
 			sourceId: excelUploadsTable.sourceId,
@@ -843,157 +871,80 @@ async function reconcileBeforeUpload(
 		})
 		.from(excelUploadsTable);
 
+	const uploadIds = previousUploads.map((upload) => upload.id);
+
+	if (uploadIds.length === 0) return;
+
+	// Ambil kombinasi periode dan minggu yang unik saja.
+	const previousEntries = await tx
+		.selectDistinct({
+			uploadId: reportEntriesTable.uploadId,
+			week: reportEntriesTable.week,
+			month: reportEntriesTable.month,
+			year: reportEntriesTable.year,
+		})
+		.from(reportEntriesTable)
+		.where(inArray(reportEntriesTable.uploadId, uploadIds));
+
+	const entriesByUpload = new Map<
+		number,
+		{ week: string; month: number; year: number }[]
+	>();
+
+	for (const entry of previousEntries) {
+		const rows = entriesByUpload.get(entry.uploadId) ?? [];
+		rows.push(entry);
+		entriesByUpload.set(entry.uploadId, rows);
+	}
+
 	for (const previousUpload of previousUploads) {
-		/*
-		 * ==========================================================
-		 * GOOGLE SHEET YANG SAMA
-		 * ==========================================================
-		 *
-		 * Jika spreadsheet ID sama, berarti user melakukan
-		 * synchronization / re-sync terhadap spreadsheet yang sama.
-		 *
-		 * Versi lama dari spreadsheet tersebut harus diganti.
-		 *
-		 * Upload record tetap disimpan untuk audit trail.
-		 */
-		if (
+		const sameGoogleSheet =
 			options.sourceType === "google_sheet" &&
 			previousUpload.sourceType === "google_sheet" &&
-			previousUpload.sourceId === options.sourceId
-		) {
-			await db
+			previousUpload.sourceId === options.sourceId;
+
+		// Sinkronisasi ulang spreadsheet yang sama.
+		if (sameGoogleSheet) {
+			await tx
 				.delete(reportEntriesTable)
 				.where(eq(reportEntriesTable.uploadId, previousUpload.id));
 
 			continue;
 		}
 
-		/*
-		 * Ambil periode data dari upload sebelumnya.
-		 */
-		const previousEntries = await db
-			.select({
-				week: reportEntriesTable.week,
-				month: reportEntriesTable.month,
-				year: reportEntriesTable.year,
-			})
-			.from(reportEntriesTable)
-			.where(eq(reportEntriesTable.uploadId, previousUpload.id));
+		const rows = entriesByUpload.get(previousUpload.id);
 
-		if (previousEntries.length === 0) {
-			continue;
-		}
+		if (!rows?.length) continue;
 
-		const previousPeriods = new Set(
-			previousEntries.map((entry) => entry.year * 100 + entry.month),
+		const previousLatestPeriod = rows.reduce(
+			(max, entry) => Math.max(max, entry.year * 100 + entry.month),
+			Number.NEGATIVE_INFINITY,
 		);
 
-		const previousLatestPeriod = Math.max(...previousPeriods);
+		// Jangan menghapus data yang lebih baru.
+		if (previousLatestPeriod > newLatestPeriod) continue;
 
-		/*
-		 * ==========================================================
-		 * UPLOAD BARU LEBIH LAMA
-		 * ==========================================================
-		 *
-		 * Contoh:
-		 *
-		 * Existing : September 2026
-		 * New      : August 2026
-		 *
-		 * Jangan menghapus September.
-		 */
-		if (previousLatestPeriod > newLatestPeriod) {
-			continue;
-		}
-
-		/*
-		 * ==========================================================
-		 * PERIODE SAMA
-		 * ==========================================================
-		 *
-		 * Contoh:
-		 *
-		 * Existing : September upload lama
-		 * New      : September upload baru
-		 *
-		 * Upload lama harus menjadi inactive.
-		 */
+		// Periode sama: ganti data upload sebelumnya.
 		if (previousLatestPeriod === newLatestPeriod) {
-			await db
+			await tx
 				.delete(reportEntriesTable)
 				.where(eq(reportEntriesTable.uploadId, previousUpload.id));
 
 			continue;
 		}
 
-		/*
-		 * ==========================================================
-		 * PERIODE LAMA
-		 * ==========================================================
-		 *
-		 * Contoh:
-		 *
-		 * Existing:
-		 *   August W31
-		 *   August W32
-		 *   August W33
-		 *   August W34
-		 *   August W35
-		 *   August W36  <-- partial / cross-month
-		 *
-		 * New:
-		 *   September W36
-		 *   September W37
-		 *   September W38
-		 *
-		 * Maka:
-		 *
-		 *   W31-W35 August → DELETE
-		 *   W36 August     → KEEP
-		 *
-		 * Karena W36 masih terdapat pada data periode baru.
-		 */
-
-		const entriesToDelete = previousEntries.filter((entry) => {
-			const entryPeriod = entry.year * 100 + entry.month;
-
-			/*
-			 * Data dari periode yang sama dengan periode baru
-			 * tidak masuk ke sini karena previousLatestPeriod
-			 * sudah lebih kecil dari newLatestPeriod.
-			 *
-			 * Untuk periode lama, hanya pertahankan week yang
-			 * juga muncul pada upload baru.
-			 *
-			 * Ini menangani week lintas bulan.
-			 */
-			if (entryPeriod < newLatestPeriod) {
-				return !newWeeks.has(entry.week);
-			}
-
-			return false;
-		});
-
-		if (entriesToDelete.length === 0) {
-			continue;
-		}
-
-		/*
-		 * Hapus berdasarkan:
-		 * uploadId + year + month + week
-		 *
-		 * Jadi kita tidak melakukan global delete terhadap
-		 * week yang sama.
-		 */
-		for (const entry of entriesToDelete) {
-			await tx.delete(reportEntriesTable).where(
-				sql`
-            ${reportEntriesTable.uploadId} = ${previousUpload.id}
-            AND ${reportEntriesTable.year} = ${entry.year}
-            AND ${reportEntriesTable.month} = ${entry.month}
-            AND ${reportEntriesTable.week} = ${entry.week}
-          `,
-			);
+		// Periode lama: hapus sekaligus, tetapi pertahankan
+		// minggu yang masih digunakan oleh periode terbaru.
+		if (newWeeks.length > 0) {
+			await tx
+				.delete(reportEntriesTable)
+				.where(
+					and(
+						eq(reportEntriesTable.uploadId, previousUpload.id),
+						sql`(${reportEntriesTable.year} * 100 + ${reportEntriesTable.month}) < ${newLatestPeriod}`,
+						notInArray(reportEntriesTable.week, newWeeks),
+					),
+				);
 		}
 	}
 }
@@ -1006,21 +957,17 @@ async function reconcileAttendanceBeforeUpload(
 		sourceId?: string;
 	},
 ) {
-	if (attendanceEntries.length === 0) {
-		return;
-	}
+	if (attendanceEntries.length === 0) return;
 
-	// Periode terbaru dari Attendance
-	const newPeriods = new Set(
-		attendanceEntries.map((entry) => entry.year * 100 + entry.month),
+	const newLatestPeriod = attendanceEntries.reduce(
+		(max, entry) => Math.max(max, entry.year * 100 + entry.month),
+		Number.NEGATIVE_INFINITY,
 	);
 
-	const newLatestPeriod = Math.max(...newPeriods);
+	const newWeeks = [...new Set(attendanceEntries.map((entry) => entry.week))];
 
-	const newWeeks = new Set(attendanceEntries.map((entry) => entry.week));
-
-	// Ambil seluruh riwayat upload
-	const previousUploads = await db
+	// Ambil metadata upload melalui transaksi yang sama.
+	const previousUploads = await tx
 		.select({
 			id: excelUploadsTable.id,
 			sourceId: excelUploadsTable.sourceId,
@@ -1028,87 +975,80 @@ async function reconcileAttendanceBeforeUpload(
 		})
 		.from(excelUploadsTable);
 
+	const uploadIds = previousUploads.map((upload) => upload.id);
+
+	if (uploadIds.length === 0) return;
+
+	// Ambil kombinasi periode dan minggu yang unik saja.
+	const previousEntries = await tx
+		.selectDistinct({
+			uploadId: attendanceRecordsTable.uploadId,
+			week: attendanceRecordsTable.week,
+			month: attendanceRecordsTable.month,
+			year: attendanceRecordsTable.year,
+		})
+		.from(attendanceRecordsTable)
+		.where(inArray(attendanceRecordsTable.uploadId, uploadIds));
+
+	const entriesByUpload = new Map<
+		number,
+		{ week: string; month: number; year: number }[]
+	>();
+
+	for (const entry of previousEntries) {
+		const rows = entriesByUpload.get(entry.uploadId) ?? [];
+		rows.push(entry);
+		entriesByUpload.set(entry.uploadId, rows);
+	}
+
 	for (const previousUpload of previousUploads) {
-		// ==========================================
-		// 1. GOOGLE SHEET YANG SAMA
-		// ==========================================
-		if (
+		const sameGoogleSheet =
 			options.sourceType === "google_sheet" &&
 			previousUpload.sourceType === "google_sheet" &&
-			previousUpload.sourceId === options.sourceId
-		) {
-			await db
+			previousUpload.sourceId === options.sourceId;
+
+		// Sinkronisasi ulang spreadsheet yang sama.
+		if (sameGoogleSheet) {
+			await tx
 				.delete(attendanceRecordsTable)
 				.where(eq(attendanceRecordsTable.uploadId, previousUpload.id));
 
 			continue;
 		}
 
-		// ==========================================
-		// 2. AMBIL DATA ATTENDANCE UPLOAD SEBELUMNYA
-		// ==========================================
-		const previousEntries = await db
-			.select({
-				week: attendanceRecordsTable.week,
-				month: attendanceRecordsTable.month,
-				year: attendanceRecordsTable.year,
-			})
-			.from(attendanceRecordsTable)
-			.where(eq(attendanceRecordsTable.uploadId, previousUpload.id));
+		const rows = entriesByUpload.get(previousUpload.id);
 
-		if (previousEntries.length === 0) {
-			continue;
-		}
+		if (!rows?.length) continue;
 
-		const previousPeriods = new Set(
-			previousEntries.map((entry) => entry.year * 100 + entry.month),
+		const previousLatestPeriod = rows.reduce(
+			(max, entry) => Math.max(max, entry.year * 100 + entry.month),
+			Number.NEGATIVE_INFINITY,
 		);
 
-		const previousLatestPeriod = Math.max(...previousPeriods);
+		// Jangan menghapus data yang lebih baru.
+		if (previousLatestPeriod > newLatestPeriod) continue;
 
-		// ==========================================
-		// 3. UPLOAD BARU LEBIH LAMA
-		// ==========================================
-		if (previousLatestPeriod > newLatestPeriod) {
-			continue;
-		}
-
-		// ==========================================
-		// 4. PERIODE SAMA
-		// ==========================================
+		// Periode sama: ganti data upload sebelumnya.
 		if (previousLatestPeriod === newLatestPeriod) {
-			await db
+			await tx
 				.delete(attendanceRecordsTable)
 				.where(eq(attendanceRecordsTable.uploadId, previousUpload.id));
 
 			continue;
 		}
 
-		// ==========================================
-		// 5. PERIODE LAMA
-		// ==========================================
-		const entriesToDelete = previousEntries.filter((entry) => {
-			const entryPeriod = entry.year * 100 + entry.month;
-
-			if (entryPeriod < newLatestPeriod) {
-				return !newWeeks.has(entry.week);
-			}
-
-			return false;
-		});
-
-		// ==========================================
-		// 6. HAPUS RECORD SESUAI PERIODE DAN WEEK
-		// ==========================================
-		for (const entry of entriesToDelete) {
-			await tx.delete(attendanceRecordsTable).where(
-				sql`
-            ${attendanceRecordsTable.uploadId} = ${previousUpload.id}
-            AND ${attendanceRecordsTable.year} = ${entry.year}
-            AND ${attendanceRecordsTable.month} = ${entry.month}
-            AND ${attendanceRecordsTable.week} = ${entry.week}
-          `,
-			);
+		// Periode lama: hapus sekaligus dan pertahankan
+		// minggu lintas bulan yang masih ada di upload terbaru.
+		if (newWeeks.length > 0) {
+			await tx
+				.delete(attendanceRecordsTable)
+				.where(
+					and(
+						eq(attendanceRecordsTable.uploadId, previousUpload.id),
+						sql`(${attendanceRecordsTable.year} * 100 + ${attendanceRecordsTable.month}) < ${newLatestPeriod}`,
+						notInArray(attendanceRecordsTable.week, newWeeks),
+					),
+				);
 		}
 	}
 }
@@ -1124,9 +1064,11 @@ async function saveParsedEntries(
 	},
 	attendanceEntries: ParsedAttendanceEntry[] = [],
 ) {
-	// ==========================================
+	const totalStartedAt = performance.now();
+
 	// 1. DEDUPLICATE SAP
-	// ==========================================
+	const sapDedupStartedAt = performance.now();
+
 	const uniqueEntries = new Map<string, ParsedEntry>();
 
 	for (const e of entries) {
@@ -1134,12 +1076,16 @@ async function saveParsedEntries(
 	}
 
 	const deduped = Array.from(uniqueEntries.values());
-
 	const weeksFound = Array.from(new Set(deduped.map((e) => e.week))).sort();
 
-	// ==========================================
+	logUploadStage("deduplicate_sap", sapDedupStartedAt, {
+		inputRows: entries.length,
+		outputRows: deduped.length,
+	});
+
 	// 2. DEDUPLICATE ATTENDANCE
-	// ==========================================
+	const attendanceDedupStartedAt = performance.now();
+
 	const uniqueAttendance = new Map<string, ParsedAttendanceEntry>();
 
 	for (const e of attendanceEntries) {
@@ -1152,92 +1098,190 @@ async function saveParsedEntries(
 
 	const dedupedAttendance = Array.from(uniqueAttendance.values());
 
-	const BATCH = 500;
-
-	// ==========================================
-	// 3. SATU TRANSAKSI UNTUK SEMUA PROSES
-	// ==========================================
-	const result = await db.transaction(async (tx) => {
-		// A. Reconcile SAP
-		await reconcileBeforeUpload(tx, deduped, weeksFound, {
-			sourceType: options.sourceType,
-			sourceId: options.sourceId,
-		});
-
-		// B. Reconcile Attendance
-		await reconcileAttendanceBeforeUpload(tx, dedupedAttendance, {
-			sourceType: options.sourceType,
-			sourceId: options.sourceId,
-		});
-
-		// C. Insert metadata upload
-		const [uploadRecord] = await tx
-			.insert(excelUploadsTable)
-			.values({
-				filename: options.filename,
-				sourceType: options.sourceType,
-				sourceUrl: options.sourceUrl ?? null,
-				sourceId: options.sourceId ?? null,
-				lastSyncedAt: options.sourceType === "google_sheet" ? new Date() : null,
-				weeksFound,
-				rowsProcessed,
-			})
-			.returning();
-
-		// D. Insert SAP
-		const toInsertSAP = deduped.map((e) => ({
-			uploadId: uploadRecord.id,
-			sourceId: e.sourceId,
-			type: e.type,
-			subType: e.subType ?? null,
-			nik: e.nik,
-			week: e.week,
-			month: e.month,
-			year: e.year,
-			timeCompliance: e.timeCompliance ?? null,
-		}));
-
-		for (let i = 0; i < toInsertSAP.length; i += BATCH) {
-			await tx
-				.insert(reportEntriesTable)
-				.values(toInsertSAP.slice(i, i + BATCH))
-				.onConflictDoNothing();
-		}
-
-		// E. Insert Attendance
-		const toInsertAttendance = dedupedAttendance.map((e) => ({
-			uploadId: uploadRecord.id,
-			nik: e.nik,
-			eventDate: e.eventDate,
-			eventType: e.eventType,
-			week: e.week,
-			month: e.month,
-			year: e.year,
-			sourceFile: options.filename,
-		}));
-
-		for (let i = 0; i < toInsertAttendance.length; i += BATCH) {
-			await tx
-				.insert(attendanceRecordsTable)
-				.values(toInsertAttendance.slice(i, i + BATCH))
-				.onConflictDoNothing();
-		}
-
-		return {
-			uploadId: uploadRecord.id,
-		};
+	logUploadStage("deduplicate_attendance", attendanceDedupStartedAt, {
+		inputRows: attendanceEntries.length,
+		outputRows: dedupedAttendance.length,
 	});
 
-	// ==========================================
-	// 4. RESPONSE
-	// ==========================================
-	return {
-		uploadId: result.uploadId,
-		weeksFound,
-		rowsProcessed,
-		minergoRows: deduped.length,
+	const BATCH = 500;
+
+	// 3. DATABASE TRANSACTION
+	const transactionStartedAt = performance.now();
+	logUploadStage("database_transaction_started", transactionStartedAt, {
+		sapRows: deduped.length,
 		attendanceRows: dedupedAttendance.length,
-	};
+	});
+
+	try {
+		const result = await db.transaction(async (tx) => {
+			// A. RECONCILE SAP
+			const reconcileSAPStartedAt = performance.now();
+			logUploadStage("reconcile_sap_started", reconcileSAPStartedAt, {
+				sapRows: deduped.length,
+			});
+
+			await reconcileBeforeUpload(tx, deduped, weeksFound, {
+				sourceType: options.sourceType,
+				sourceId: options.sourceId,
+			});
+
+			logUploadStage("reconcile_sap", reconcileSAPStartedAt);
+
+			// B. RECONCILE ATTENDANCE
+			const reconcileAttendanceStartedAt = performance.now();
+
+			logUploadStage(
+				"reconcile_attendance_started",
+				reconcileAttendanceStartedAt,
+				{
+					attendanceRows: dedupedAttendance.length,
+				},
+			);
+
+			await reconcileAttendanceBeforeUpload(tx, dedupedAttendance, {
+				sourceType: options.sourceType,
+				sourceId: options.sourceId,
+			});
+
+			logUploadStage("reconcile_attendance", reconcileAttendanceStartedAt);
+
+			// C. INSERT METADATA
+			const metadataStartedAt = performance.now();
+			logUploadStage("insert_metadata_started", metadataStartedAt);
+
+			const [uploadRecord] = await tx
+				.insert(excelUploadsTable)
+				.values({
+					filename: options.filename,
+					sourceType: options.sourceType,
+					sourceUrl: options.sourceUrl ?? null,
+					sourceId: options.sourceId ?? null,
+					lastSyncedAt:
+						options.sourceType === "google_sheet" ? new Date() : null,
+					weeksFound,
+					rowsProcessed,
+				})
+				.returning();
+
+			logUploadStage("insert_metadata", metadataStartedAt, {
+				uploadId: uploadRecord.id,
+			});
+
+			// D. INSERT SAP
+			const toInsertSAP = deduped.map((e) => ({
+				uploadId: uploadRecord.id,
+				sourceId: e.sourceId,
+				type: e.type,
+				subType: e.subType ?? null,
+				nik: e.nik,
+				week: e.week,
+				month: e.month,
+				year: e.year,
+				timeCompliance: e.timeCompliance ?? null,
+			}));
+
+			const insertSAPStartedAt = performance.now();
+			let sapBatches = 0;
+
+			for (let i = 0; i < toInsertSAP.length; i += BATCH) {
+				const batchStartedAt = performance.now();
+
+				// LOG SEBELUM INSERT SAP
+				logUploadStage("insert_sap_batch_started", batchStartedAt, {
+					batch: sapBatches + 1,
+					batchRows: Math.min(BATCH, toInsertSAP.length - i),
+				});
+
+				await tx
+					.insert(reportEntriesTable)
+					.values(toInsertSAP.slice(i, i + BATCH))
+					.onConflictDoNothing();
+
+				sapBatches++;
+
+				logUploadStage("insert_sap_batch", batchStartedAt, {
+					batch: sapBatches,
+					batchRows: Math.min(BATCH, toInsertSAP.length - i),
+				});
+			}
+
+			logUploadStage("insert_sap_total", insertSAPStartedAt, {
+				totalRows: toInsertSAP.length,
+				batches: sapBatches,
+			});
+
+			// E. INSERT ATTENDANCE
+			const toInsertAttendance = dedupedAttendance.map((e) => ({
+				uploadId: uploadRecord.id,
+				nik: e.nik,
+				eventDate: e.eventDate,
+				eventType: e.eventType,
+				week: e.week,
+				month: e.month,
+				year: e.year,
+				sourceFile: options.filename,
+			}));
+
+			const insertAttendanceStartedAt = performance.now();
+			let attendanceBatches = 0;
+
+			for (let i = 0; i < toInsertAttendance.length; i += BATCH) {
+				const batchStartedAt = performance.now();
+
+				// LOG SEBELUM INSERT ATTENDANCE
+				logUploadStage("insert_attendance_batch_started", batchStartedAt, {
+					batch: attendanceBatches + 1,
+					batchRows: Math.min(BATCH, toInsertAttendance.length - i),
+				});
+
+				await tx
+					.insert(attendanceRecordsTable)
+					.values(toInsertAttendance.slice(i, i + BATCH))
+					.onConflictDoNothing();
+
+				attendanceBatches++;
+
+				logUploadStage("insert_attendance_batch", batchStartedAt, {
+					batch: attendanceBatches,
+					batchRows: Math.min(BATCH, toInsertAttendance.length - i),
+				});
+			}
+
+			logUploadStage("insert_attendance_total", insertAttendanceStartedAt, {
+				totalRows: toInsertAttendance.length,
+				batches: attendanceBatches,
+			});
+
+			return {
+				uploadId: uploadRecord.id,
+			};
+		});
+
+		logUploadStage("database_transaction_completed", transactionStartedAt, {
+			uploadId: result.uploadId,
+		});
+
+		logUploadStage("save_parsed_entries_completed", totalStartedAt, {
+			uploadId: result.uploadId,
+			sapRows: deduped.length,
+			attendanceRows: dedupedAttendance.length,
+			rowsProcessed,
+		});
+
+		return {
+			uploadId: result.uploadId,
+			weeksFound,
+			rowsProcessed,
+			minergoRows: deduped.length,
+			attendanceRows: dedupedAttendance.length,
+		};
+	} catch (error) {
+		logUploadStage("database_transaction_failed", transactionStartedAt, {
+			error: error instanceof Error ? error.message : String(error),
+		});
+
+		throw error;
+	}
 }
 
 router.post(
