@@ -9,7 +9,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
-import { excelUploadsTable } from "./excel-uploads";
+import { excelUploadsTable } from "./excel-uploads.js";
 
 export const attendanceRecordsTable = pgTable(
 	"attendance_records",
