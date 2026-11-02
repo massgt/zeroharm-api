@@ -5,3 +5,4 @@ dist/
 .env
 .credentials/
 credentials/
+zeroharm-dev-backup.dump

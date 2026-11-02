@@ -5,6 +5,64 @@ import { downloadGoogleDriveFile, getGoogleDriveFile } from "./google-drive.js";
 
 const COMPANY = "PT. Minergo Visi Maxima";
 
+function normalizeCompanyName(value: unknown): string {
+	return String(value ?? "")
+		.toUpperCase()
+		.replace(/[^A-Z0-9]/g, "");
+}
+
+function isMinergoCompany(value: unknown): boolean {
+	return normalizeCompanyName(value) === normalizeCompanyName(COMPANY);
+}
+
+function getGoogleAttendanceEventDate(value: unknown): string | undefined {
+	if (value instanceof Date && !Number.isNaN(value.getTime())) {
+		return [
+			value.getFullYear(),
+			String(value.getMonth() + 1).padStart(2, "0"),
+			String(value.getDate()).padStart(2, "0"),
+		].join("-");
+	}
+
+	if (typeof value === "number" && Number.isFinite(value)) {
+		const date = new Date(Date.UTC(1899, 11, 30) + value * 86400000);
+
+		return date.toISOString().slice(0, 10);
+	}
+
+	const raw = String(value ?? "").trim();
+
+	const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+
+	if (isoMatch) {
+		return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+	}
+
+	const localMatch = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+
+	if (localMatch) {
+		const day = Number(localMatch[1]);
+		const month = Number(localMatch[2]);
+		const year = Number(localMatch[3]);
+
+		const date = new Date(Date.UTC(year, month - 1, day));
+
+		if (
+			date.getUTCFullYear() === year &&
+			date.getUTCMonth() === month - 1 &&
+			date.getUTCDate() === day
+		) {
+			return [
+				year,
+				String(month).padStart(2, "0"),
+				String(day).padStart(2, "0"),
+			].join("-");
+		}
+	}
+
+	return undefined;
+}
+
 type OPKSubType =
 	| "keberadaan_pengawas"
 	| "fungsi_pengawas"
@@ -25,6 +83,14 @@ export interface ParsedGoogleEntry {
 	month: number;
 	year: number;
 	timeCompliance?: string;
+}
+export interface ParsedGoogleAttendanceEntry {
+	nik: string;
+	eventDate: string;
+	eventType: string;
+	week: string;
+	month: number;
+	year: number;
 }
 
 function cellValue(value: ExcelJS.CellValue): unknown {
@@ -102,6 +168,7 @@ export async function parseGoogleDriveXlsx(
 ): Promise<{
 	rowsProcessed: number;
 	entries: number;
+	attendanceEntries: ParsedGoogleAttendanceEntry[];
 	sheetsProcessed: string[];
 }> {
 	const file = await getGoogleDriveFile(fileId);
@@ -125,6 +192,7 @@ export async function parseGoogleDriveXlsx(
 
 	let rowsProcessed = 0;
 	let entries = 0;
+	const attendanceEntries: ParsedGoogleAttendanceEntry[] = [];
 
 	const sheetsProcessed: string[] = [];
 
@@ -134,10 +202,9 @@ export async function parseGoogleDriveXlsx(
 		);
 
 		if (
-			sheetName !== "Hazard" &&
-			sheetName !== "Inspeksi" &&
-			sheetName !== "Observasi" &&
-			sheetName !== "OPK"
+			!["Hazard", "Inspeksi", "Observasi", "OPK", "Attendance"].includes(
+				sheetName,
+			)
 		) {
 			continue;
 		}
@@ -150,6 +217,74 @@ export async function parseGoogleDriveXlsx(
 			}
 
 			let entry: ParsedGoogleEntry | undefined;
+
+			// ==========================================
+			// ATTENDANCE - SOSIALISASI IBPR & GOLDEN RULES
+			// ==========================================
+			if (sheetName === "Attendance") {
+				// Kolom L = Perusahaan
+				const company = row.getCell(12).value;
+
+				if (!isMinergoCompany(company)) {
+					continue;
+				}
+
+				// Kolom G = NIK
+				const nik = text(row.getCell(7).value);
+
+				if (!nik) {
+					continue;
+				}
+
+				// Kolom B = Tanggal Event
+				const eventDate = getGoogleAttendanceEventDate(row.getCell(2).value);
+
+				if (!eventDate) {
+					continue;
+				}
+
+				// Kolom D = Tipe Event
+				const eventType = text(row.getCell(4).value);
+
+				const allowedEventTypes = [
+					"P5M, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
+					"Safety Talk, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
+					"Sosialisasi Golden Rules",
+					"Sosialisasi IBPR",
+				];
+
+				if (!allowedEventTypes.includes(eventType)) {
+					continue;
+				}
+
+				// Kolom Q = Week
+				const week = text(row.getCell(17).value);
+
+				if (!week) {
+					continue;
+				}
+
+				// Kolom R = Month
+				const month = number(row.getCell(18).value);
+
+				if (!Number.isInteger(month) || month < 1 || month > 12) {
+					continue;
+				}
+
+				// Year mengikuti tanggal event kolom B
+				const year = Number(eventDate.slice(0, 4));
+
+				attendanceEntries.push({
+					nik,
+					eventDate,
+					eventType,
+					week,
+					month,
+					year,
+				});
+
+				continue;
+			}
 
 			if (sheetName === "Hazard") {
 				const company = text(row.getCell(7).value);
@@ -291,6 +426,7 @@ export async function parseGoogleDriveXlsx(
 	return {
 		rowsProcessed,
 		entries,
+		attendanceEntries,
 		sheetsProcessed,
 	};
 }

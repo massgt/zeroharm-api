@@ -10,6 +10,9 @@ export const teamMembersTable = pgTable("team_members", {
 	isPjo: boolean("is_pjo").notNull().default(false),
 	isHse: boolean("is_hse").notNull().default(false),
 	isOnLeave: boolean("is_on_leave").notNull().default(false),
+	isActive: boolean("is_active").notNull().default(true),
+
+	isSapParticipant: boolean("is_sap_participant").notNull().default(true),
 
 	// Shared categories
 	targetTta: integer("target_tta").notNull().default(0),
