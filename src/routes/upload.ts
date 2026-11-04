@@ -1758,7 +1758,10 @@ router.post(
 				return;
 			}
 
-			const workbook = xlsx.readFile(req.file.path, {
+			const fileBuffer = await fs.readFile(req.file.path);
+
+			const workbook = xlsx.read(fileBuffer, {
+				type: "buffer",
 				cellDates: false,
 			});
 
