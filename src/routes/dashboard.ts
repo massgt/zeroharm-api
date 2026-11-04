@@ -141,6 +141,7 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 	const members = await db
 		.select()
 		.from(teamMembersTable)
+		.where(eq(teamMembersTable.isSapParticipant, true))
 		.orderBy(teamMembersTable.name);
 	if (members.length === 0) {
 		res.json(

@@ -4,6 +4,7 @@ import membersRouter from "./members.js";
 import uploadRouter from "./upload.js";
 import dashboardRouter from "./dashboard.js";
 import safetyCampaignsRouter from "./safety-campaigns.js";
+import sosialisasiRouter from "./sosialisasi.js";
 
 const router: IRouter = Router();
 
@@ -12,5 +13,6 @@ router.use(membersRouter);
 router.use(uploadRouter);
 router.use(dashboardRouter);
 router.use("/safety-campaigns", safetyCampaignsRouter);
+router.use("/sosialisasi", sosialisasiRouter);
 
 export default router;

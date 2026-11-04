@@ -8,11 +8,17 @@ import ExcelJS from "exceljs";
 
 import fs from "node:fs/promises";
 
-import { db, excelUploadsTable, reportEntriesTable } from "../db/index.js";
+import {
+	db,
+	excelUploadsTable,
+	reportEntriesTable,
+	teamMembersTable,
+	attendanceRecordsTable,
+} from "../db/index.js";
 
 import { ListUploadsResponse } from "../api-zod/index.js";
 
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 import { getGoogleSheetValues } from "../services/google-sheets.js";
 
@@ -32,6 +38,8 @@ import {
 	createExcelChunkUploadUrl,
 	deleteExcelChunks,
 } from "../services/supabase-excel-storage.js";
+
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 const router: IRouter = Router();
 const storage = multer.diskStorage({
@@ -176,6 +184,73 @@ interface ParsedEntry {
 	year: number;
 }
 
+interface ParsedAttendanceEntry {
+	nik: string;
+	eventDate: string;
+	eventType: string;
+	week: string;
+	month: number;
+	year: number;
+}
+
+function normalizeCompanyName(value: unknown): string {
+	return String(value ?? "")
+		.toUpperCase()
+		.replace(/[^A-Z0-9]/g, "");
+}
+
+function isMinergoCompany(value: unknown): boolean {
+	return normalizeCompanyName(value) === normalizeCompanyName(COMPANY);
+}
+
+function getAttendanceEventDate(value: unknown): string | undefined {
+	if (value instanceof Date && !Number.isNaN(value.getTime())) {
+		return value.toISOString().slice(0, 10);
+	}
+
+	if (typeof value === "number" && Number.isFinite(value)) {
+		const date = new Date(Date.UTC(1899, 11, 30) + value * 86400000);
+
+		return date.toISOString().slice(0, 10);
+	}
+
+	const textValue = String(value ?? "").trim();
+
+	if (!textValue) return undefined;
+
+	// Format YYYY-MM-DD atau YYYY-MM-DDTHH:mm:ss
+	const isoMatch = textValue.match(/^(\d{4})-(\d{2})-(\d{2})/);
+
+	if (isoMatch) {
+		return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+	}
+
+	// Format DD/MM/YYYY atau DD-MM-YYYY
+	const localMatch = textValue.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+
+	if (localMatch) {
+		const day = Number(localMatch[1]);
+		const month = Number(localMatch[2]);
+		const year = Number(localMatch[3]);
+
+		const date = new Date(Date.UTC(year, month - 1, day));
+
+		if (
+			date.getUTCFullYear() === year &&
+			date.getUTCMonth() === month - 1 &&
+			date.getUTCDate() === day
+		) {
+			return [
+				year,
+				String(month).padStart(2, "0"),
+				String(day).padStart(2, "0"),
+			].join("-");
+		}
+	}
+
+	return undefined;
+}
+
 function convertGoogleEntry(entry: ParsedGoogleEntry): ParsedEntry {
 	return {
 		sourceId: entry.sourceId,
@@ -224,9 +299,11 @@ async function parseExcelStreaming(
 	onEntry?: (entry: ParsedEntry) => Promise<void> | void,
 ): Promise<{
 	entries: ParsedEntry[];
+	attendanceEntries: ParsedAttendanceEntry[];
 	rowsProcessed: number;
 }> {
 	const entries: ParsedEntry[] = [];
+	const attendanceEntries: ParsedAttendanceEntry[] = [];
 	let rowsProcessed = 0;
 
 	const workbook = new ExcelJS.stream.xlsx.WorkbookReader(filePath, {
@@ -237,13 +314,14 @@ async function parseExcelStreaming(
 		worksheets: "emit",
 	});
 
-	let worksheetIndex = 0;
-
 	for await (const worksheet of workbook) {
-		const sheetNames = ["Hazard", "Inspeksi", "Observasi", "OPK"] as const;
-		const sheetName = sheetNames[worksheetIndex++];
+		const sheetName = (worksheet as typeof worksheet & { name: string }).name;
 
-		if (!sheetName) {
+		if (
+			!["Hazard", "Inspeksi", "Observasi", "OPK", "Attendance"].includes(
+				sheetName,
+			)
+		) {
 			continue;
 		}
 
@@ -263,6 +341,56 @@ async function parseExcelStreaming(
 			}
 
 			let entry: ParsedEntry | undefined;
+			// Attendance: data Sosialisasi IBPR & Golden Rules
+			if (sheetName === "Attendance") {
+				// Kolom L: Perusahaan
+				if (!isMinergoCompany(r[11])) continue;
+
+				// Kolom G: NIK
+				const nik = String(r[6] ?? "").trim();
+				if (!nik) continue;
+
+				// Kolom B: Tanggal Event
+				const eventDate = getAttendanceEventDate(r[1]);
+				if (!eventDate) continue;
+
+				// Kolom D: Tipe Event
+				const eventType = String(r[3] ?? "").trim();
+
+				const allowedEventTypes = [
+					"P5M, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
+					"Safety Talk, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
+					"Sosialisasi Golden Rules",
+					"Sosialisasi IBPR",
+				];
+
+				if (!allowedEventTypes.includes(eventType)) continue;
+
+				// Kolom Q: Week
+				const week = String(r[16] ?? "").trim();
+				if (!week) continue;
+
+				// Kolom R: Month
+				const month = Number(r[17]);
+
+				if (!Number.isInteger(month) || month < 1 || month > 12) {
+					continue;
+				}
+
+				// Tahun mengikuti tanggal event pada kolom B
+				const year = Number(eventDate.slice(0, 4));
+
+				attendanceEntries.push({
+					nik,
+					eventDate,
+					eventType,
+					week,
+					month,
+					year,
+				});
+
+				continue;
+			}
 
 			if (sheetName === "Hazard") {
 				if (String(r[6] ?? "").trim() !== COMPANY) continue;
@@ -413,7 +541,11 @@ async function parseExcelStreaming(
 		}
 	}
 
-	return { entries, rowsProcessed };
+	return {
+		entries,
+		attendanceEntries,
+		rowsProcessed,
+	};
 }
 
 async function parseGoogleSheet(spreadsheetId: string): Promise<{
@@ -604,91 +736,116 @@ async function parseGoogleSheet(spreadsheetId: string): Promise<{
 	};
 }
 
+function logUploadStage(
+	stage: string,
+	startedAt: number,
+	details: Record<string, unknown> = {},
+) {
+	console.log(
+		JSON.stringify({
+			scope: "google_sheet_upload",
+			stage,
+			durationMs: Math.round(performance.now() - startedAt),
+			timestamp: new Date().toISOString(),
+			...details,
+		}),
+	);
+}
+
 async function saveGoogleSheetData(
 	spreadsheetId: string,
 	sourceUrl: string,
 ): Promise<{
 	uploadId: number;
 	entries: number;
+	attendanceRows: number;
 	rowsProcessed: number;
 	weeksFound: string[];
 }> {
+	// ==========================================
+	// 1. PARSE GOOGLE SHEETS
+	// ==========================================
+	const totalStartedAt = performance.now();
+
+	// 1. PARSE GOOGLE SHEETS
+	const parseStartedAt = performance.now();
+
+	logUploadStage("google_sheet_parse_started", parseStartedAt, {
+		spreadsheetId,
+	});
+
 	const entries: ParsedEntry[] = [];
 
 	const result = await parseGoogleDriveXlsx(spreadsheetId, (entry) => {
 		entries.push(convertGoogleEntry(entry));
 	});
 
-	const uniqueEntries = new Map<string, ParsedEntry>();
+	logUploadStage("google_sheet_parse_completed", parseStartedAt, {
+		spreadsheetId,
+		sapEntries: entries.length,
+		attendanceEntries: result.attendanceEntries.length,
+		rowsProcessed: result.rowsProcessed,
+		sheetsProcessed: result.sheetsProcessed,
+	});
 
-	for (const entry of entries) {
-		uniqueEntries.set(
-			`${entry.sourceId}|${entry.type}|${entry.subType ?? ""}`,
-			entry,
-		);
-	}
-
-	const deduped = Array.from(uniqueEntries.values());
-
-	const weeksFound = Array.from(
-		new Set(deduped.map((entry) => entry.week)),
-	).sort();
-
-	if (deduped.length === 0) {
+	// ==========================================
+	// 2. VALIDASI DATA
+	// ==========================================
+	if (entries.length === 0 && result.attendanceEntries.length === 0) {
 		throw new Error(
 			"No PT. Minergo Visi Maxima data found in the Google Spreadsheet",
 		);
 	}
 
-	await reconcileBeforeUpload(deduped, weeksFound, {
-		sourceType: "google_sheet",
-		sourceId: spreadsheetId,
+	// ==========================================
+	// 3. SIMPAN SAP + ATTENDANCE
+	//    MENGGUNAKAN FUNGSI YANG SAMA
+	// ==========================================
+	const saveStartedAt = performance.now();
+
+	logUploadStage("google_sheet_save_started", saveStartedAt, {
+		spreadsheetId,
+		sapEntries: entries.length,
+		attendanceEntries: result.attendanceEntries.length,
 	});
 
-	// Simpan metadata upload/sync baru
-	const [uploadRecord] = await db
-		.insert(excelUploadsTable)
-		.values({
+	const saveResult = await saveParsedEntries(
+		entries,
+		result.rowsProcessed,
+		{
 			filename: `Google Sheet ${spreadsheetId}`,
-			weeksFound,
-			rowsProcessed: result.rowsProcessed,
 			sourceType: "google_sheet",
 			sourceUrl,
 			sourceId: spreadsheetId,
-			lastSyncedAt: new Date(),
-		})
-		.returning();
+		},
+		result.attendanceEntries,
+	);
 
-	const BATCH = 500;
+	logUploadStage("google_sheet_save_completed", saveStartedAt, {
+		spreadsheetId,
+		uploadId: saveResult.uploadId,
+		sapRows: saveResult.minergoRows,
+		attendanceRows: saveResult.attendanceRows,
+	});
 
-	const toInsert = deduped.map((entry) => ({
-		uploadId: uploadRecord.id,
-		sourceId: entry.sourceId,
-		type: entry.type,
-		subType: entry.subType ?? null,
-		nik: entry.nik,
-		week: entry.week,
-		month: entry.month,
-		year: entry.year,
-		timeCompliance: entry.timeCompliance ?? null,
-	}));
-
-	for (let i = 0; i < toInsert.length; i += BATCH) {
-		await db
-			.insert(reportEntriesTable)
-			.values(toInsert.slice(i, i + BATCH))
-			.onConflictDoNothing();
-	}
-
+	// ==========================================
+	// 4. RESPONSE
+	// ==========================================
+	logUploadStage("google_sheet_upload_completed", totalStartedAt, {
+		spreadsheetId,
+		uploadId: saveResult.uploadId,
+	});
 	return {
-		uploadId: uploadRecord.id,
-		entries: deduped.length,
+		uploadId: saveResult.uploadId,
+		entries: saveResult.minergoRows,
+		attendanceRows: saveResult.attendanceRows,
 		rowsProcessed: result.rowsProcessed,
-		weeksFound,
+		weeksFound: saveResult.weeksFound,
 	};
 }
 
 async function reconcileBeforeUpload(
+	tx: DbTransaction,
 	deduped: ParsedEntry[],
 	weeksFound: string[],
 	options: {
@@ -696,41 +853,17 @@ async function reconcileBeforeUpload(
 		sourceId?: string;
 	},
 ) {
-	if (deduped.length === 0) {
-		return;
-	}
+	if (deduped.length === 0) return;
 
-	/*
-	 * ============================================================
-	 * ACTIVE VERSION RULE
-	 * ============================================================
-	 *
-	 * Periode ditentukan dari YEAR + MONTH.
-	 *
-	 * Contoh:
-	 * 2026-08 = Agustus
-	 * 2026-09 = September
-	 *
-	 * Jika upload baru mempunyai periode yang lebih baru:
-	 * - data periode lama diganti
-	 * - tetapi week lintas bulan tetap dipertahankan
-	 *
-	 * Jika upload baru mempunyai periode yang sama:
-	 * - upload lama pada periode tersebut diganti
-	 *
-	 * Jika upload baru lebih lama:
-	 * - upload yang lebih baru tidak disentuh
-	 */
-
-	const newPeriods = new Set(
-		deduped.map((entry) => entry.year * 100 + entry.month),
+	const newLatestPeriod = deduped.reduce(
+		(max, entry) => Math.max(max, entry.year * 100 + entry.month),
+		Number.NEGATIVE_INFINITY,
 	);
 
-	const newLatestPeriod = Math.max(...newPeriods);
+	const newWeeks = [...new Set(weeksFound)];
 
-	const newWeeks = new Set(weeksFound);
-
-	const previousUploads = await db
+	// Ambil metadata upload melalui transaksi yang sama.
+	const previousUploads = await tx
 		.select({
 			id: excelUploadsTable.id,
 			sourceId: excelUploadsTable.sourceId,
@@ -738,157 +871,184 @@ async function reconcileBeforeUpload(
 		})
 		.from(excelUploadsTable);
 
+	const uploadIds = previousUploads.map((upload) => upload.id);
+
+	if (uploadIds.length === 0) return;
+
+	// Ambil kombinasi periode dan minggu yang unik saja.
+	const previousEntries = await tx
+		.selectDistinct({
+			uploadId: reportEntriesTable.uploadId,
+			week: reportEntriesTable.week,
+			month: reportEntriesTable.month,
+			year: reportEntriesTable.year,
+		})
+		.from(reportEntriesTable)
+		.where(inArray(reportEntriesTable.uploadId, uploadIds));
+
+	const entriesByUpload = new Map<
+		number,
+		{ week: string; month: number; year: number }[]
+	>();
+
+	for (const entry of previousEntries) {
+		const rows = entriesByUpload.get(entry.uploadId) ?? [];
+		rows.push(entry);
+		entriesByUpload.set(entry.uploadId, rows);
+	}
+
 	for (const previousUpload of previousUploads) {
-		/*
-		 * ==========================================================
-		 * GOOGLE SHEET YANG SAMA
-		 * ==========================================================
-		 *
-		 * Jika spreadsheet ID sama, berarti user melakukan
-		 * synchronization / re-sync terhadap spreadsheet yang sama.
-		 *
-		 * Versi lama dari spreadsheet tersebut harus diganti.
-		 *
-		 * Upload record tetap disimpan untuk audit trail.
-		 */
-		if (
+		const sameGoogleSheet =
 			options.sourceType === "google_sheet" &&
 			previousUpload.sourceType === "google_sheet" &&
-			previousUpload.sourceId === options.sourceId
-		) {
-			await db
+			previousUpload.sourceId === options.sourceId;
+
+		// Sinkronisasi ulang spreadsheet yang sama.
+		if (sameGoogleSheet) {
+			await tx
 				.delete(reportEntriesTable)
 				.where(eq(reportEntriesTable.uploadId, previousUpload.id));
 
 			continue;
 		}
 
-		/*
-		 * Ambil periode data dari upload sebelumnya.
-		 */
-		const previousEntries = await db
-			.select({
-				week: reportEntriesTable.week,
-				month: reportEntriesTable.month,
-				year: reportEntriesTable.year,
-			})
-			.from(reportEntriesTable)
-			.where(eq(reportEntriesTable.uploadId, previousUpload.id));
+		const rows = entriesByUpload.get(previousUpload.id);
 
-		if (previousEntries.length === 0) {
-			continue;
-		}
+		if (!rows?.length) continue;
 
-		const previousPeriods = new Set(
-			previousEntries.map((entry) => entry.year * 100 + entry.month),
+		const previousLatestPeriod = rows.reduce(
+			(max, entry) => Math.max(max, entry.year * 100 + entry.month),
+			Number.NEGATIVE_INFINITY,
 		);
 
-		const previousLatestPeriod = Math.max(...previousPeriods);
+		// Jangan menghapus data yang lebih baru.
+		if (previousLatestPeriod > newLatestPeriod) continue;
 
-		/*
-		 * ==========================================================
-		 * UPLOAD BARU LEBIH LAMA
-		 * ==========================================================
-		 *
-		 * Contoh:
-		 *
-		 * Existing : September 2026
-		 * New      : August 2026
-		 *
-		 * Jangan menghapus September.
-		 */
-		if (previousLatestPeriod > newLatestPeriod) {
-			continue;
-		}
-
-		/*
-		 * ==========================================================
-		 * PERIODE SAMA
-		 * ==========================================================
-		 *
-		 * Contoh:
-		 *
-		 * Existing : September upload lama
-		 * New      : September upload baru
-		 *
-		 * Upload lama harus menjadi inactive.
-		 */
+		// Periode sama: ganti data upload sebelumnya.
 		if (previousLatestPeriod === newLatestPeriod) {
-			await db
+			await tx
 				.delete(reportEntriesTable)
 				.where(eq(reportEntriesTable.uploadId, previousUpload.id));
 
 			continue;
 		}
 
-		/*
-		 * ==========================================================
-		 * PERIODE LAMA
-		 * ==========================================================
-		 *
-		 * Contoh:
-		 *
-		 * Existing:
-		 *   August W31
-		 *   August W32
-		 *   August W33
-		 *   August W34
-		 *   August W35
-		 *   August W36  <-- partial / cross-month
-		 *
-		 * New:
-		 *   September W36
-		 *   September W37
-		 *   September W38
-		 *
-		 * Maka:
-		 *
-		 *   W31-W35 August → DELETE
-		 *   W36 August     → KEEP
-		 *
-		 * Karena W36 masih terdapat pada data periode baru.
-		 */
+		// Periode lama: hapus sekaligus, tetapi pertahankan
+		// minggu yang masih digunakan oleh periode terbaru.
+		if (newWeeks.length > 0) {
+			await tx
+				.delete(reportEntriesTable)
+				.where(
+					and(
+						eq(reportEntriesTable.uploadId, previousUpload.id),
+						sql`(${reportEntriesTable.year} * 100 + ${reportEntriesTable.month}) < ${newLatestPeriod}`,
+						notInArray(reportEntriesTable.week, newWeeks),
+					),
+				);
+		}
+	}
+}
 
-		const entriesToDelete = previousEntries.filter((entry) => {
-			const entryPeriod = entry.year * 100 + entry.month;
+async function reconcileAttendanceBeforeUpload(
+	tx: DbTransaction,
+	attendanceEntries: ParsedAttendanceEntry[],
+	options: {
+		sourceType: "manual" | "google_sheet";
+		sourceId?: string;
+	},
+) {
+	if (attendanceEntries.length === 0) return;
 
-			/*
-			 * Data dari periode yang sama dengan periode baru
-			 * tidak masuk ke sini karena previousLatestPeriod
-			 * sudah lebih kecil dari newLatestPeriod.
-			 *
-			 * Untuk periode lama, hanya pertahankan week yang
-			 * juga muncul pada upload baru.
-			 *
-			 * Ini menangani week lintas bulan.
-			 */
-			if (entryPeriod < newLatestPeriod) {
-				return !newWeeks.has(entry.week);
-			}
+	const newLatestPeriod = attendanceEntries.reduce(
+		(max, entry) => Math.max(max, entry.year * 100 + entry.month),
+		Number.NEGATIVE_INFINITY,
+	);
 
-			return false;
-		});
+	const newWeeks = [...new Set(attendanceEntries.map((entry) => entry.week))];
 
-		if (entriesToDelete.length === 0) {
+	// Ambil metadata upload melalui transaksi yang sama.
+	const previousUploads = await tx
+		.select({
+			id: excelUploadsTable.id,
+			sourceId: excelUploadsTable.sourceId,
+			sourceType: excelUploadsTable.sourceType,
+		})
+		.from(excelUploadsTable);
+
+	const uploadIds = previousUploads.map((upload) => upload.id);
+
+	if (uploadIds.length === 0) return;
+
+	// Ambil kombinasi periode dan minggu yang unik saja.
+	const previousEntries = await tx
+		.selectDistinct({
+			uploadId: attendanceRecordsTable.uploadId,
+			week: attendanceRecordsTable.week,
+			month: attendanceRecordsTable.month,
+			year: attendanceRecordsTable.year,
+		})
+		.from(attendanceRecordsTable)
+		.where(inArray(attendanceRecordsTable.uploadId, uploadIds));
+
+	const entriesByUpload = new Map<
+		number,
+		{ week: string; month: number; year: number }[]
+	>();
+
+	for (const entry of previousEntries) {
+		const rows = entriesByUpload.get(entry.uploadId) ?? [];
+		rows.push(entry);
+		entriesByUpload.set(entry.uploadId, rows);
+	}
+
+	for (const previousUpload of previousUploads) {
+		const sameGoogleSheet =
+			options.sourceType === "google_sheet" &&
+			previousUpload.sourceType === "google_sheet" &&
+			previousUpload.sourceId === options.sourceId;
+
+		// Sinkronisasi ulang spreadsheet yang sama.
+		if (sameGoogleSheet) {
+			await tx
+				.delete(attendanceRecordsTable)
+				.where(eq(attendanceRecordsTable.uploadId, previousUpload.id));
+
 			continue;
 		}
 
-		/*
-		 * Hapus berdasarkan:
-		 * uploadId + year + month + week
-		 *
-		 * Jadi kita tidak melakukan global delete terhadap
-		 * week yang sama.
-		 */
-		for (const entry of entriesToDelete) {
-			await db.delete(reportEntriesTable).where(
-				sql`
-            ${reportEntriesTable.uploadId} = ${previousUpload.id}
-            AND ${reportEntriesTable.year} = ${entry.year}
-            AND ${reportEntriesTable.month} = ${entry.month}
-            AND ${reportEntriesTable.week} = ${entry.week}
-          `,
-			);
+		const rows = entriesByUpload.get(previousUpload.id);
+
+		if (!rows?.length) continue;
+
+		const previousLatestPeriod = rows.reduce(
+			(max, entry) => Math.max(max, entry.year * 100 + entry.month),
+			Number.NEGATIVE_INFINITY,
+		);
+
+		// Jangan menghapus data yang lebih baru.
+		if (previousLatestPeriod > newLatestPeriod) continue;
+
+		// Periode sama: ganti data upload sebelumnya.
+		if (previousLatestPeriod === newLatestPeriod) {
+			await tx
+				.delete(attendanceRecordsTable)
+				.where(eq(attendanceRecordsTable.uploadId, previousUpload.id));
+
+			continue;
+		}
+
+		// Periode lama: hapus sekaligus dan pertahankan
+		// minggu lintas bulan yang masih ada di upload terbaru.
+		if (newWeeks.length > 0) {
+			await tx
+				.delete(attendanceRecordsTable)
+				.where(
+					and(
+						eq(attendanceRecordsTable.uploadId, previousUpload.id),
+						sql`(${attendanceRecordsTable.year} * 100 + ${attendanceRecordsTable.month}) < ${newLatestPeriod}`,
+						notInArray(attendanceRecordsTable.week, newWeeks),
+					),
+				);
 		}
 	}
 }
@@ -902,7 +1062,13 @@ async function saveParsedEntries(
 		sourceUrl?: string;
 		sourceId?: string;
 	},
+	attendanceEntries: ParsedAttendanceEntry[] = [],
 ) {
+	const totalStartedAt = performance.now();
+
+	// 1. DEDUPLICATE SAP
+	const sapDedupStartedAt = performance.now();
+
 	const uniqueEntries = new Map<string, ParsedEntry>();
 
 	for (const e of entries) {
@@ -910,55 +1076,212 @@ async function saveParsedEntries(
 	}
 
 	const deduped = Array.from(uniqueEntries.values());
-
 	const weeksFound = Array.from(new Set(deduped.map((e) => e.week))).sort();
 
-	// Hapus data lama untuk week yang terdapat pada data terbaru.
-	await reconcileBeforeUpload(deduped, weeksFound, {
-		sourceType: options.sourceType,
-		sourceId: options.sourceId,
+	logUploadStage("deduplicate_sap", sapDedupStartedAt, {
+		inputRows: entries.length,
+		outputRows: deduped.length,
 	});
 
-	const [uploadRecord] = await db
-		.insert(excelUploadsTable)
-		.values({
-			filename: options.filename,
-			sourceType: options.sourceType,
-			sourceUrl: options.sourceUrl ?? null,
-			sourceId: options.sourceId ?? null,
-			lastSyncedAt: options.sourceType === "google_sheet" ? new Date() : null,
-			weeksFound,
-			rowsProcessed,
-		})
-		.returning();
+	// 2. DEDUPLICATE ATTENDANCE
+	const attendanceDedupStartedAt = performance.now();
+
+	const uniqueAttendance = new Map<string, ParsedAttendanceEntry>();
+
+	for (const e of attendanceEntries) {
+		const key = [e.nik, e.eventDate, e.eventType, e.week, e.month, e.year].join(
+			"|",
+		);
+
+		uniqueAttendance.set(key, e);
+	}
+
+	const dedupedAttendance = Array.from(uniqueAttendance.values());
+
+	logUploadStage("deduplicate_attendance", attendanceDedupStartedAt, {
+		inputRows: attendanceEntries.length,
+		outputRows: dedupedAttendance.length,
+	});
 
 	const BATCH = 500;
 
-	const toInsert = deduped.map((e) => ({
-		uploadId: uploadRecord.id,
-		sourceId: e.sourceId,
-		type: e.type,
-		subType: e.subType ?? null,
-		nik: e.nik,
-		week: e.week,
-		month: e.month,
-		year: e.year,
-		timeCompliance: e.timeCompliance ?? null,
-	}));
+	// 3. DATABASE TRANSACTION
+	const transactionStartedAt = performance.now();
+	logUploadStage("database_transaction_started", transactionStartedAt, {
+		sapRows: deduped.length,
+		attendanceRows: dedupedAttendance.length,
+	});
 
-	for (let i = 0; i < toInsert.length; i += BATCH) {
-		await db
-			.insert(reportEntriesTable)
-			.values(toInsert.slice(i, i + BATCH))
-			.onConflictDoNothing();
+	try {
+		const result = await db.transaction(async (tx) => {
+			// A. RECONCILE SAP
+			const reconcileSAPStartedAt = performance.now();
+			logUploadStage("reconcile_sap_started", reconcileSAPStartedAt, {
+				sapRows: deduped.length,
+			});
+
+			await reconcileBeforeUpload(tx, deduped, weeksFound, {
+				sourceType: options.sourceType,
+				sourceId: options.sourceId,
+			});
+
+			logUploadStage("reconcile_sap", reconcileSAPStartedAt);
+
+			// B. RECONCILE ATTENDANCE
+			const reconcileAttendanceStartedAt = performance.now();
+
+			logUploadStage(
+				"reconcile_attendance_started",
+				reconcileAttendanceStartedAt,
+				{
+					attendanceRows: dedupedAttendance.length,
+				},
+			);
+
+			await reconcileAttendanceBeforeUpload(tx, dedupedAttendance, {
+				sourceType: options.sourceType,
+				sourceId: options.sourceId,
+			});
+
+			logUploadStage("reconcile_attendance", reconcileAttendanceStartedAt);
+
+			// C. INSERT METADATA
+			const metadataStartedAt = performance.now();
+			logUploadStage("insert_metadata_started", metadataStartedAt);
+
+			const [uploadRecord] = await tx
+				.insert(excelUploadsTable)
+				.values({
+					filename: options.filename,
+					sourceType: options.sourceType,
+					sourceUrl: options.sourceUrl ?? null,
+					sourceId: options.sourceId ?? null,
+					lastSyncedAt:
+						options.sourceType === "google_sheet" ? new Date() : null,
+					weeksFound,
+					rowsProcessed,
+				})
+				.returning();
+
+			logUploadStage("insert_metadata", metadataStartedAt, {
+				uploadId: uploadRecord.id,
+			});
+
+			// D. INSERT SAP
+			const toInsertSAP = deduped.map((e) => ({
+				uploadId: uploadRecord.id,
+				sourceId: e.sourceId,
+				type: e.type,
+				subType: e.subType ?? null,
+				nik: e.nik,
+				week: e.week,
+				month: e.month,
+				year: e.year,
+				timeCompliance: e.timeCompliance ?? null,
+			}));
+
+			const insertSAPStartedAt = performance.now();
+			let sapBatches = 0;
+
+			for (let i = 0; i < toInsertSAP.length; i += BATCH) {
+				const batchStartedAt = performance.now();
+
+				// LOG SEBELUM INSERT SAP
+				logUploadStage("insert_sap_batch_started", batchStartedAt, {
+					batch: sapBatches + 1,
+					batchRows: Math.min(BATCH, toInsertSAP.length - i),
+				});
+
+				await tx
+					.insert(reportEntriesTable)
+					.values(toInsertSAP.slice(i, i + BATCH))
+					.onConflictDoNothing();
+
+				sapBatches++;
+
+				logUploadStage("insert_sap_batch", batchStartedAt, {
+					batch: sapBatches,
+					batchRows: Math.min(BATCH, toInsertSAP.length - i),
+				});
+			}
+
+			logUploadStage("insert_sap_total", insertSAPStartedAt, {
+				totalRows: toInsertSAP.length,
+				batches: sapBatches,
+			});
+
+			// E. INSERT ATTENDANCE
+			const toInsertAttendance = dedupedAttendance.map((e) => ({
+				uploadId: uploadRecord.id,
+				nik: e.nik,
+				eventDate: e.eventDate,
+				eventType: e.eventType,
+				week: e.week,
+				month: e.month,
+				year: e.year,
+				sourceFile: options.filename,
+			}));
+
+			const insertAttendanceStartedAt = performance.now();
+			let attendanceBatches = 0;
+
+			for (let i = 0; i < toInsertAttendance.length; i += BATCH) {
+				const batchStartedAt = performance.now();
+
+				// LOG SEBELUM INSERT ATTENDANCE
+				logUploadStage("insert_attendance_batch_started", batchStartedAt, {
+					batch: attendanceBatches + 1,
+					batchRows: Math.min(BATCH, toInsertAttendance.length - i),
+				});
+
+				await tx
+					.insert(attendanceRecordsTable)
+					.values(toInsertAttendance.slice(i, i + BATCH))
+					.onConflictDoNothing();
+
+				attendanceBatches++;
+
+				logUploadStage("insert_attendance_batch", batchStartedAt, {
+					batch: attendanceBatches,
+					batchRows: Math.min(BATCH, toInsertAttendance.length - i),
+				});
+			}
+
+			logUploadStage("insert_attendance_total", insertAttendanceStartedAt, {
+				totalRows: toInsertAttendance.length,
+				batches: attendanceBatches,
+			});
+
+			return {
+				uploadId: uploadRecord.id,
+			};
+		});
+
+		logUploadStage("database_transaction_completed", transactionStartedAt, {
+			uploadId: result.uploadId,
+		});
+
+		logUploadStage("save_parsed_entries_completed", totalStartedAt, {
+			uploadId: result.uploadId,
+			sapRows: deduped.length,
+			attendanceRows: dedupedAttendance.length,
+			rowsProcessed,
+		});
+
+		return {
+			uploadId: result.uploadId,
+			weeksFound,
+			rowsProcessed,
+			minergoRows: deduped.length,
+			attendanceRows: dedupedAttendance.length,
+		};
+	} catch (error) {
+		logUploadStage("database_transaction_failed", transactionStartedAt, {
+			error: error instanceof Error ? error.message : String(error),
+		});
+
+		throw error;
 	}
-
-	return {
-		uploadId: uploadRecord.id,
-		weeksFound,
-		rowsProcessed,
-		minergoRows: deduped.length,
-	};
 }
 
 router.post(
@@ -1245,12 +1568,18 @@ router.post("/upload/excel-chunked", async (req, res): Promise<void> => {
 			});
 		}
 
-		const { entries, rowsProcessed } = await parseExcelStreaming(tempFilePath);
+		const { entries, attendanceEntries, rowsProcessed } =
+			await parseExcelStreaming(tempFilePath);
 
-		const result = await saveParsedEntries(entries, rowsProcessed, {
-			filename,
-			sourceType: "manual",
-		});
+		const result = await saveParsedEntries(
+			entries,
+			rowsProcessed,
+			{
+				filename,
+				sourceType: "manual",
+			},
+			attendanceEntries,
+		);
 
 		req.log.info(
 			{
@@ -1369,10 +1698,17 @@ router.delete("/uploads/:id", async (req, res): Promise<void> => {
 		}
 
 		await db.transaction(async (tx) => {
+			// Hapus data SAP
 			await tx
 				.delete(reportEntriesTable)
 				.where(eq(reportEntriesTable.uploadId, uploadId));
 
+			// Hapus data Attendance
+			await tx
+				.delete(attendanceRecordsTable)
+				.where(eq(attendanceRecordsTable.uploadId, uploadId));
+
+			// Hapus metadata upload
 			await tx
 				.delete(excelUploadsTable)
 				.where(eq(excelUploadsTable.id, uploadId));
@@ -1410,5 +1746,448 @@ router.get("/uploads", async (_req, res): Promise<void> => {
 		),
 	);
 });
+router.post(
+	"/upload/employees",
+	upload.single("file"),
+	async (req, res): Promise<void> => {
+		try {
+			if (!req.file) {
+				res.status(400).json({
+					error: "File Excel wajib diunggah dengan field name: file",
+				});
+				return;
+			}
+
+			const fileBuffer = await fs.readFile(req.file.path);
+
+			const workbook = xlsx.read(fileBuffer, {
+				type: "buffer",
+				cellDates: false,
+			});
+
+			const sheetName = workbook.SheetNames[0];
+
+			if (!sheetName) {
+				res.status(400).json({ error: "Sheet Excel tidak ditemukan" });
+				return;
+			}
+
+			const worksheet = workbook.Sheets[sheetName];
+
+			const rows = xlsx.utils.sheet_to_json<Record<string, unknown>>(
+				worksheet,
+				{ defval: "" },
+			);
+
+			if (rows.length === 0) {
+				res.status(400).json({ error: "Data Excel kosong" });
+				return;
+			}
+
+			const normalize = (value: unknown) => String(value ?? "").trim();
+
+			const defaultTargets = {
+				PJO: {
+					targetTta: 0,
+					targetHazard: 1,
+					targetInspeksi: 1,
+					targetObservasi: 1,
+					targetOpkKeberadaanPengawas: 0,
+					targetOpkFungsiPengawas: 0,
+					targetOpkPencahayaan: 0,
+					targetOpkP2h: 0,
+					targetOpkSeatbelt: 0,
+					targetOpkSimper: 0,
+					targetOpkRoster: 0,
+					targetOpkFatigue: 0,
+					targetOpkLototo: 0,
+				},
+				HSE: {
+					targetTta: 0,
+					targetHazard: 7,
+					targetInspeksi: 7,
+					targetObservasi: 4,
+					targetOpkKeberadaanPengawas: 10,
+					targetOpkFungsiPengawas: 10,
+					targetOpkPencahayaan: 1,
+					targetOpkP2h: 0,
+					targetOpkSeatbelt: 0,
+					targetOpkSimper: 0,
+					targetOpkRoster: 0,
+					targetOpkFatigue: 0,
+					targetOpkLototo: 0,
+				},
+				PENGAWAS: {
+					targetTta: 0,
+					targetHazard: 7,
+					targetInspeksi: 7,
+					targetObservasi: 4,
+					targetOpkKeberadaanPengawas: 0,
+					targetOpkFungsiPengawas: 0,
+					targetOpkPencahayaan: 0,
+					targetOpkP2h: 5,
+					targetOpkSeatbelt: 5,
+					targetOpkSimper: 10,
+					targetOpkRoster: 10,
+					targetOpkFatigue: 10,
+					targetOpkLototo: 1,
+				},
+				CREW: {
+					targetTta: 0,
+					targetHazard: 0,
+					targetInspeksi: 0,
+					targetObservasi: 0,
+					targetOpkKeberadaanPengawas: 0,
+					targetOpkFungsiPengawas: 0,
+					targetOpkPencahayaan: 0,
+					targetOpkP2h: 0,
+					targetOpkSeatbelt: 0,
+					targetOpkSimper: 0,
+					targetOpkRoster: 0,
+					targetOpkFatigue: 0,
+					targetOpkLototo: 0,
+				},
+			} as const;
+
+			const roleFlags = {
+				PJO: {
+					isPjo: true,
+					isHse: false,
+					isSapParticipant: true,
+				},
+				HSE: {
+					isPjo: false,
+					isHse: true,
+					isSapParticipant: true,
+				},
+				PENGAWAS: {
+					isPjo: false,
+					isHse: false,
+					isSapParticipant: true,
+				},
+				CREW: {
+					isPjo: false,
+					isHse: false,
+					isSapParticipant: false,
+				},
+			} as const;
+
+			const normalizeHeader = (value: string) =>
+				value.toLowerCase().replace(/[\s_-]+/g, "");
+
+			const headers = Object.keys(rows[0] ?? {});
+			const headerMap = new Map(
+				headers.map((header) => [normalizeHeader(header), header]),
+			);
+
+			const getValue = (row: Record<string, unknown>, aliases: string[]) => {
+				for (const alias of aliases) {
+					const header = headerMap.get(normalizeHeader(alias));
+					if (header !== undefined) return normalize(row[header]);
+				}
+				return "";
+			};
+
+			const requiredHeaders = [
+				{ name: "NIK", aliases: ["NIK"] },
+				{ name: "Nama", aliases: ["Nama", "Nama Lengkap"] },
+				{ name: "Departemen", aliases: ["Departemen", "Department"] },
+				{ name: "Jabatan", aliases: ["Jabatan", "Position"] },
+				{ name: "Role", aliases: ["Role"] },
+				{ name: "Status", aliases: ["Status", "Status Kehadiran"] },
+			];
+
+			const missingHeaders = requiredHeaders
+				.filter(
+					(item) =>
+						!item.aliases.some((alias) =>
+							headerMap.has(normalizeHeader(alias)),
+						),
+				)
+				.map((item) => item.name);
+
+			if (missingHeaders.length > 0) {
+				res.status(400).json({
+					error: `Kolom wajib tidak ditemukan: ${missingHeaders.join(", ")}`,
+				});
+				return;
+			}
+
+			const seenNiks = new Set<string>();
+			const validRows: {
+				nik: string;
+				name: string;
+				department: string;
+				jabatan: string;
+				role: keyof typeof defaultTargets;
+				isOnLeave: boolean;
+				targets: {
+					targetTta: number;
+					targetHazard: number;
+					targetInspeksi: number;
+					targetObservasi: number;
+					targetOpkKeberadaanPengawas: number;
+					targetOpkFungsiPengawas: number;
+					targetOpkPencahayaan: number;
+					targetOpkP2h: number;
+					targetOpkSeatbelt: number;
+					targetOpkSimper: number;
+					targetOpkRoster: number;
+					targetOpkFatigue: number;
+					targetOpkLototo: number;
+				};
+			}[] = [];
+
+			const errors: {
+				row: number;
+				nik: string;
+				reason: string;
+			}[] = [];
+
+			rows.forEach((row, index) => {
+				const excelRow = index + 2;
+				const nik = getValue(row, ["NIK"]);
+				const name = getValue(row, ["Nama", "Nama Lengkap"]);
+				const department = getValue(row, ["Departemen", "Department"]);
+				const jabatan = getValue(row, ["Jabatan", "Position"]);
+
+				const role = getValue(row, [
+					"Role",
+				]).toUpperCase() as keyof typeof defaultTargets;
+
+				const readTarget = (
+					header: string,
+					defaultValue: number,
+				): number | null => {
+					const raw = getValue(row, [header]);
+
+					if (raw === "") return defaultValue;
+
+					const parsed = Number(raw.replace(",", "."));
+
+					if (!Number.isFinite(parsed) || parsed < 0) {
+						return null;
+					}
+
+					return parsed;
+				};
+
+				const targets = {
+					targetTta: readTarget(
+						"Target TTA",
+						defaultTargets[role]?.targetTta ?? 0,
+					),
+					targetHazard: readTarget(
+						"Target Hazard",
+						defaultTargets[role]?.targetHazard ?? 0,
+					),
+					targetInspeksi: readTarget(
+						"Target Inspeksi",
+						defaultTargets[role]?.targetInspeksi ?? 0,
+					),
+					targetObservasi: readTarget(
+						"Target Observasi",
+						defaultTargets[role]?.targetObservasi ?? 0,
+					),
+					targetOpkKeberadaanPengawas: readTarget(
+						"Target OPK Keberadaan Pengawas",
+						defaultTargets[role]?.targetOpkKeberadaanPengawas ?? 0,
+					),
+					targetOpkFungsiPengawas: readTarget(
+						"Target OPK Fungsi Pengawas",
+						defaultTargets[role]?.targetOpkFungsiPengawas ?? 0,
+					),
+					targetOpkPencahayaan: readTarget(
+						"Target OPK Pencahayaan",
+						defaultTargets[role]?.targetOpkPencahayaan ?? 0,
+					),
+					targetOpkP2h: readTarget(
+						"Target OPK P2H",
+						defaultTargets[role]?.targetOpkP2h ?? 0,
+					),
+					targetOpkSeatbelt: readTarget(
+						"Target OPK Seatbelt",
+						defaultTargets[role]?.targetOpkSeatbelt ?? 0,
+					),
+					targetOpkSimper: readTarget(
+						"Target OPK Simper",
+						defaultTargets[role]?.targetOpkSimper ?? 0,
+					),
+					targetOpkRoster: readTarget(
+						"Target OPK Roster",
+						defaultTargets[role]?.targetOpkRoster ?? 0,
+					),
+					targetOpkFatigue: readTarget(
+						"Target OPK Fatigue",
+						defaultTargets[role]?.targetOpkFatigue ?? 0,
+					),
+					targetOpkLototo: readTarget(
+						"Target OPK LOTOTO",
+						defaultTargets[role]?.targetOpkLototo ?? 0,
+					),
+				};
+
+				const status = getValue(row, [
+					"Status",
+					"Status Kehadiran",
+				]).toUpperCase();
+
+				if (!nik) {
+					errors.push({
+						row: excelRow,
+						nik: "-",
+						reason: "NIK kosong",
+					});
+					return;
+				}
+
+				if (seenNiks.has(nik)) {
+					errors.push({
+						row: excelRow,
+						nik,
+						reason: "NIK duplikat dalam file",
+					});
+					return;
+				}
+
+				seenNiks.add(nik);
+
+				if (!name || !department || !jabatan) {
+					errors.push({
+						row: excelRow,
+						nik,
+						reason: "Nama, departemen, atau jabatan kosong",
+					});
+					return;
+				}
+
+				if (!["ONSITE", "CUTI"].includes(status)) {
+					errors.push({
+						row: excelRow,
+						nik,
+						reason: "Status wajib diisi dengan ONSITE atau CUTI",
+					});
+					return;
+				}
+				if (!["PJO", "HSE", "PENGAWAS", "CREW"].includes(role)) {
+					errors.push({
+						row: excelRow,
+						nik,
+						reason: "Role wajib diisi dengan PJO, HSE, PENGAWAS, atau CREW",
+					});
+					return;
+				}
+
+				const invalidTarget = Object.entries(targets).find(
+					([, value]) => value === null,
+				);
+
+				if (invalidTarget) {
+					errors.push({
+						row: excelRow,
+						nik,
+						reason: `Nilai target ${invalidTarget[0]} harus berupa angka nol atau lebih.`,
+					});
+					return;
+				}
+
+				validRows.push({
+					nik,
+					name,
+					department,
+					jabatan,
+					role,
+					isOnLeave: status === "CUTI",
+					targets: targets as {
+						targetTta: number;
+						targetHazard: number;
+						targetInspeksi: number;
+						targetObservasi: number;
+						targetOpkKeberadaanPengawas: number;
+						targetOpkFungsiPengawas: number;
+						targetOpkPencahayaan: number;
+						targetOpkP2h: number;
+						targetOpkSeatbelt: number;
+						targetOpkSimper: number;
+						targetOpkRoster: number;
+						targetOpkFatigue: number;
+						targetOpkLototo: number;
+					},
+				});
+			});
+
+			let inserted = 0;
+			let updated = 0;
+
+			await db.transaction(async (tx) => {
+				for (const employee of validRows) {
+					const existing = await tx
+						.select({ nik: teamMembersTable.nik })
+						.from(teamMembersTable)
+						.where(eq(teamMembersTable.nik, employee.nik))
+						.limit(1);
+
+					if (existing.length > 0) {
+						await tx
+							.update(teamMembersTable)
+							.set({
+								name: employee.name,
+								department: employee.department,
+								jabatan: employee.jabatan,
+								isOnLeave: employee.isOnLeave,
+
+								// Konfigurasi Role
+								...roleFlags[employee.role],
+
+								// Target SAP dan OPK
+								...employee.targets,
+							})
+							.where(eq(teamMembersTable.nik, employee.nik));
+
+						updated++;
+					} else {
+						await tx.insert(teamMembersTable).values({
+							nik: employee.nik,
+							name: employee.name,
+							department: employee.department,
+							jabatan: employee.jabatan,
+							isOnLeave: employee.isOnLeave,
+
+							// Konfigurasi Role
+							...roleFlags[employee.role],
+
+							// Target SAP dan OPK
+							...employee.targets,
+
+							// Status kepegawaian
+							isActive: true,
+						});
+
+						inserted++;
+					}
+				}
+			});
+
+			res.json({
+				success: true,
+				totalRows: rows.length,
+				inserted,
+				updated,
+				failed: errors.length,
+				errors,
+			});
+		} catch (error) {
+			req.log.error({ err: error }, "Employee Excel import failed");
+
+			res.status(500).json({
+				error: "Gagal memproses import data karyawan",
+			});
+		} finally {
+			if (req.file?.path) {
+				await fs.unlink(req.file.path).catch(() => {});
+			}
+		}
+	},
+);
 
 export default router;

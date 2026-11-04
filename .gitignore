@@ -1,10 +1,8 @@
-node_modules/
-dist/
-.DS_Store
-.tsbuildinfo
+dist
 .env
 .credentials/
 credentials/
 
 # Local database backups
 *.dump
+zeroharm-dev-backup.dump

@@ -25,18 +25,21 @@ export const ListMembersResponseItem = zod.object({
 	isPjo: zod.boolean(),
 	isHse: zod.boolean(),
 	isOnLeave: zod.boolean(),
+	isActive: zod.boolean(),
 	targetTta: zod.number(),
 	targetHazard: zod.number(),
 	targetInspeksi: zod.number(),
 	targetObservasi: zod.number(),
 	targetOpkKeberadaanPengawas: zod.number(),
 	targetOpkFungsiPengawas: zod.number(),
+	targetOpkPencahayaan: zod.number(),
 	targetOpkP2h: zod.number(),
 	targetOpkSeatbelt: zod.number(),
 	targetOpkSimper: zod.number(),
 	targetOpkRoster: zod.number(),
 	targetOpkFatigue: zod.number(),
 	targetOpkLototo: zod.number(),
+	isSapParticipant: zod.boolean(),
 });
 export const ListMembersResponse = zod.array(ListMembersResponseItem);
 
@@ -49,6 +52,7 @@ export const UpsertMemberBody = zod.object({
 	department: zod.string(),
 	jabatan: zod.string(),
 	isPjo: zod.boolean(),
+	isSapParticipant: zod.boolean(),
 	isHse: zod.boolean(),
 	targetTta: zod.number(),
 	targetHazard: zod.number(),
@@ -56,6 +60,7 @@ export const UpsertMemberBody = zod.object({
 	targetObservasi: zod.number(),
 	targetOpkKeberadaanPengawas: zod.number(),
 	targetOpkFungsiPengawas: zod.number(),
+	targetOpkPencahayaan: zod.number(),
 	targetOpkP2h: zod.number(),
 	targetOpkSeatbelt: zod.number(),
 	targetOpkSimper: zod.number(),
@@ -71,13 +76,16 @@ export const UpsertMemberResponse = zod.object({
 	jabatan: zod.string(),
 	isPjo: zod.boolean(),
 	isHse: zod.boolean(),
+	isSapParticipant: zod.boolean(),
 	isOnLeave: zod.boolean(),
+	isActive: zod.boolean(),
 	targetTta: zod.number(),
 	targetHazard: zod.number(),
 	targetInspeksi: zod.number(),
 	targetObservasi: zod.number(),
 	targetOpkKeberadaanPengawas: zod.number(),
 	targetOpkFungsiPengawas: zod.number(),
+	targetOpkPencahayaan: zod.number(),
 	targetOpkP2h: zod.number(),
 	targetOpkSeatbelt: zod.number(),
 	targetOpkSimper: zod.number(),
@@ -103,9 +111,11 @@ export const UpdateMemberBody = zod.object({
 	targetTta: zod.number().optional(),
 	targetHazard: zod.number().optional(),
 	targetInspeksi: zod.number().optional(),
+	isSapParticipant: zod.boolean(),
 	targetObservasi: zod.number().optional(),
 	targetOpkKeberadaanPengawas: zod.number().optional(),
 	targetOpkFungsiPengawas: zod.number().optional(),
+	targetOpkPencahayaan: zod.number().optional(),
 	targetOpkP2h: zod.number().optional(),
 	targetOpkSeatbelt: zod.number().optional(),
 	targetOpkSimper: zod.number().optional(),
@@ -121,13 +131,16 @@ export const UpdateMemberResponse = zod.object({
 	jabatan: zod.string(),
 	isPjo: zod.boolean(),
 	isHse: zod.boolean(),
+	isSapParticipant: zod.boolean(),
 	isOnLeave: zod.boolean(),
+	isActive: zod.boolean(),
 	targetTta: zod.number(),
 	targetHazard: zod.number(),
 	targetInspeksi: zod.number(),
 	targetObservasi: zod.number(),
 	targetOpkKeberadaanPengawas: zod.number(),
 	targetOpkFungsiPengawas: zod.number(),
+	targetOpkPencahayaan: zod.number(),
 	targetOpkP2h: zod.number(),
 	targetOpkSeatbelt: zod.number(),
 	targetOpkSimper: zod.number(),
@@ -154,6 +167,22 @@ export const SetMemberLeaveBody = zod.object({
 	isOnLeave: zod.boolean(),
 });
 
+/**
+ * @summary Set active status for a team member
+ */
+export const SetMemberActiveParams = zod.object({
+	nik: zod.coerce.string(),
+});
+
+export const SetMemberActiveBody = zod.object({
+	isActive: zod.boolean(),
+});
+
+export const SetMemberActiveResponse = zod.object({
+	nik: zod.string(),
+	isActive: zod.boolean(),
+});
+
 export const SetMemberLeaveResponse = zod.object({
 	nik: zod.string(),
 	name: zod.string(),
@@ -164,6 +193,7 @@ export const SetMemberLeaveResponse = zod.object({
 	isOnLeave: zod.boolean(),
 	targetTta: zod.number(),
 	targetHazard: zod.number(),
+	isSapParticipant: zod.boolean(),
 	targetInspeksi: zod.number(),
 	targetObservasi: zod.number(),
 	targetOpkKeberadaanPengawas: zod.number(),
