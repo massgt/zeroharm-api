@@ -53,6 +53,7 @@ router.post("/members", async (req, res): Promise<void> => {
 				targetObservasi: parsed.data.targetObservasi,
 				targetOpkKeberadaanPengawas: parsed.data.targetOpkKeberadaanPengawas,
 				targetOpkFungsiPengawas: parsed.data.targetOpkFungsiPengawas,
+				targetOpkPencahayaan: parsed.data.targetOpkPencahayaan,
 				targetOpkP2h: parsed.data.targetOpkP2h,
 				targetOpkSeatbelt: parsed.data.targetOpkSeatbelt,
 				targetOpkSimper: parsed.data.targetOpkSimper,
@@ -80,7 +81,9 @@ router.patch("/members/:nik", async (req, res): Promise<void> => {
 
 	// Build partial update — only include defined fields
 	const updateData: Partial<typeof teamMembersTable.$inferInsert> = {};
+
 	const d = body.data;
+
 	if (d.name !== undefined) updateData.name = d.name;
 	if (d.department !== undefined) updateData.department = d.department;
 	if (d.jabatan !== undefined) updateData.jabatan = d.jabatan;
@@ -99,6 +102,9 @@ router.patch("/members/:nik", async (req, res): Promise<void> => {
 		updateData.targetOpkKeberadaanPengawas = d.targetOpkKeberadaanPengawas;
 	if (d.targetOpkFungsiPengawas !== undefined)
 		updateData.targetOpkFungsiPengawas = d.targetOpkFungsiPengawas;
+	if (d.targetOpkPencahayaan !== undefined) {
+		updateData.targetOpkPencahayaan = d.targetOpkPencahayaan;
+	}
 	if (d.targetOpkP2h !== undefined) updateData.targetOpkP2h = d.targetOpkP2h;
 	if (d.targetOpkSeatbelt !== undefined)
 		updateData.targetOpkSeatbelt = d.targetOpkSeatbelt;

@@ -1791,6 +1791,7 @@ router.post(
 					targetObservasi: 1,
 					targetOpkKeberadaanPengawas: 0,
 					targetOpkFungsiPengawas: 0,
+					targetOpkPencahayaan: 0,
 					targetOpkP2h: 0,
 					targetOpkSeatbelt: 0,
 					targetOpkSimper: 0,
@@ -1805,6 +1806,7 @@ router.post(
 					targetObservasi: 4,
 					targetOpkKeberadaanPengawas: 10,
 					targetOpkFungsiPengawas: 10,
+					targetOpkPencahayaan: 1,
 					targetOpkP2h: 0,
 					targetOpkSeatbelt: 0,
 					targetOpkSimper: 0,
@@ -1819,6 +1821,7 @@ router.post(
 					targetObservasi: 4,
 					targetOpkKeberadaanPengawas: 0,
 					targetOpkFungsiPengawas: 0,
+					targetOpkPencahayaan: 0,
 					targetOpkP2h: 5,
 					targetOpkSeatbelt: 5,
 					targetOpkSimper: 10,
@@ -1833,6 +1836,7 @@ router.post(
 					targetObservasi: 0,
 					targetOpkKeberadaanPengawas: 0,
 					targetOpkFungsiPengawas: 0,
+					targetOpkPencahayaan: 0,
 					targetOpkP2h: 0,
 					targetOpkSeatbelt: 0,
 					targetOpkSimper: 0,
@@ -1921,6 +1925,7 @@ router.post(
 					targetObservasi: number;
 					targetOpkKeberadaanPengawas: number;
 					targetOpkFungsiPengawas: number;
+					targetOpkPencahayaan: number;
 					targetOpkP2h: number;
 					targetOpkSeatbelt: number;
 					targetOpkSimper: number;
@@ -1988,6 +1993,10 @@ router.post(
 					targetOpkFungsiPengawas: readTarget(
 						"Target OPK Fungsi Pengawas",
 						defaultTargets[role]?.targetOpkFungsiPengawas ?? 0,
+					),
+					targetOpkPencahayaan: readTarget(
+						"Target OPK Pencahayaan",
+						defaultTargets[role]?.targetOpkPencahayaan ?? 0,
 					),
 					targetOpkP2h: readTarget(
 						"Target OPK P2H",
@@ -2093,6 +2102,7 @@ router.post(
 						targetObservasi: number;
 						targetOpkKeberadaanPengawas: number;
 						targetOpkFungsiPengawas: number;
+						targetOpkPencahayaan: number;
 						targetOpkP2h: number;
 						targetOpkSeatbelt: number;
 						targetOpkSimper: number;
