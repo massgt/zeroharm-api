@@ -18,7 +18,7 @@ import {
 
 import { ListUploadsResponse } from "../api-zod/index.js";
 
-import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 import { getGoogleSheetValues } from "../services/google-sheets.js";
 
@@ -1728,6 +1728,23 @@ router.delete("/uploads/:id", async (req, res): Promise<void> => {
 			success: false,
 			error: "Failed to delete upload data",
 		});
+	}
+});
+
+router.get("/uploads/latest", async (_req, res): Promise<void> => {
+	try {
+		const [latestUpload] = await db
+			.select({ uploadedAt: excelUploadsTable.uploadedAt })
+			.from(excelUploadsTable)
+			.orderBy(desc(excelUploadsTable.uploadedAt))
+			.limit(1);
+
+		res.json({
+			uploadedAt: latestUpload?.uploadedAt.toISOString() ?? null,
+		});
+	} catch (error) {
+		console.error("Failed to fetch latest upload", error);
+		res.status(500).json({ error: "Failed to fetch latest upload" });
 	}
 });
 
