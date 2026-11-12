@@ -9,8 +9,17 @@ import {
 	attendanceRecordsTable,
 	excelUploadsTable,
 } from "../db/index.js";
+import { isAdminRequest, requireAdmin } from "./auth.js";
 
 const router: IRouter = Router();
+
+router.use((req, res, next) => {
+	if (req.method === "GET" || req.method === "HEAD") {
+		next();
+		return;
+	}
+	requireAdmin(req, res, next);
+});
 
 const upload = multer({
 	dest: "/tmp",
@@ -831,7 +840,7 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 			month,
 		};
 
-		res.json({
+		const commonResponse = {
 			success: true,
 			period,
 			lastUpdate: lastUpdate
@@ -842,6 +851,27 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 					}
 				: null,
 			summary,
+		};
+
+		if (!isAdminRequest(req)) {
+			res.json({
+				...commonResponse,
+				employees: employees
+					.filter((employee) => employee.eligibleForTarget)
+					.map(({
+						nik: _nik,
+						employeeStatus: _employeeStatus,
+						ibprDates: _ibprDates,
+						grDates: _grDates,
+						eligibleForTarget: _eligibleForTarget,
+						...employee
+					}) => employee),
+			});
+			return;
+		}
+
+		res.json({
+			...commonResponse,
 			employees,
 		});
 	} catch (error) {

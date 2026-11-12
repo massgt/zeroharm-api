@@ -18,7 +18,7 @@ import {
 
 import { ListUploadsResponse } from "../api-zod/index.js";
 
-import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 import { getGoogleSheetValues } from "../services/google-sheets.js";
 
@@ -40,8 +40,21 @@ import {
 } from "../services/supabase-excel-storage.js";
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+import { requireAdmin } from "./auth.js";
 
 const router: IRouter = Router();
+
+// Lindungi hanya endpoint upload dan daftar upload.
+// Jangan pasang middleware ini ke seluruh router karena router ini juga
+// dilewati oleh endpoint lain seperti GET /weeks dan GET /dashboard.
+router.use("/upload", requireAdmin);
+router.use("/uploads", (req, res, next) => {
+	if (req.method === "GET" && req.path === "/uploads/latest") {
+		next();
+		return;
+	}
+	requireAdmin(req, res, next);
+});
 const storage = multer.diskStorage({
 	destination: "/tmp",
 	filename: (_req, file, cb) => {
@@ -1728,6 +1741,23 @@ router.delete("/uploads/:id", async (req, res): Promise<void> => {
 			success: false,
 			error: "Failed to delete upload data",
 		});
+	}
+});
+
+router.get("/uploads/latest", async (_req, res): Promise<void> => {
+	try {
+		const [latestUpload] = await db
+			.select({ uploadedAt: excelUploadsTable.uploadedAt })
+			.from(excelUploadsTable)
+			.orderBy(desc(excelUploadsTable.uploadedAt))
+			.limit(1);
+
+		res.json({
+			uploadedAt: latestUpload?.uploadedAt.toISOString() ?? null,
+		});
+	} catch (error) {
+		console.error("Failed to fetch latest upload", error);
+		res.status(500).json({ error: "Failed to fetch latest upload" });
 	}
 });
 

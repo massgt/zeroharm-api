@@ -7,6 +7,7 @@ import {
 	reportEntriesTable,
 	excelUploadsTable,
 } from "../db/index.js";
+import { isAdminRequest } from "./auth.js";
 import {
 	GetDashboardQueryParams,
 	GetDashboardResponse,
@@ -436,19 +437,30 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 
 	const overallPct = activeCount > 0 ? Math.round(totalPct / activeCount) : 0;
 
-	res.json(
-		GetDashboardResponse.parse({
-			week,
-			members: memberProgresses,
-			summary: {
-				totalMembers: activeCount,
-				fullyCompliant,
-				partiallyCompliant,
-				notReported,
-				overallPct,
-			},
-		}),
-	);
+	const response = GetDashboardResponse.parse({
+		week,
+		members: memberProgresses,
+		summary: {
+			totalMembers: activeCount,
+			fullyCompliant,
+			partiallyCompliant,
+			notReported,
+			overallPct,
+		},
+	});
+
+	if (!isAdminRequest(req)) {
+		const viewerResponse = {
+			...response,
+			members: response.members
+				.filter((member) => !member.isOnLeave)
+				.map(({ nik: _nik, isOnLeave: _isOnLeave, ...member }) => member),
+		};
+		res.json(viewerResponse);
+		return;
+	}
+
+	res.json(response);
 });
 
 export default router;
