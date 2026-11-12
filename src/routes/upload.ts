@@ -40,8 +40,17 @@ import {
 } from "../services/supabase-excel-storage.js";
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+import { requireAdmin } from "./auth.js";
 
 const router: IRouter = Router();
+
+router.use((req, res, next) => {
+	if (req.method === "GET" && req.path === "/uploads/latest") {
+		next();
+		return;
+	}
+	requireAdmin(req, res, next);
+});
 const storage = multer.diskStorage({
 	destination: "/tmp",
 	filename: (_req, file, cb) => {
