@@ -7,6 +7,18 @@ import {
 const router = Router();
 const COOKIE_NAME = "zh_admin";
 const SESSION_TTL_SECONDS = 12 * 60 * 60;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+
+function originAllowed(origin: string | undefined): boolean {
+	if (!origin) return true;
+	const allowed = (process.env.FRONTEND_ORIGINS ?? "")
+		.split(",")
+		.map((value) => value.trim())
+		.filter(Boolean);
+	return allowed.includes(origin);
+}
 
 function getSecret(): string {
 	const secret = process.env.AUTH_SECRET;
@@ -41,6 +53,10 @@ export function isAdminRequest(req: { cookies?: Record<string, string> }): boole
 
 export const requireAdmin: RequestHandler = (req, res, next) => {
 	try {
+		if (!originAllowed(req.get("origin"))) {
+			res.status(403).json({ error: "Request origin is not allowed" });
+			return;
+		}
 		if (!verifySession(req.cookies?.[COOKIE_NAME])) {
 			res.status(401).json({ error: "Admin authentication required" });
 			return;
@@ -53,6 +69,22 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
 };
 
 router.post("/auth/login", (req, res): void => {
+	if (!originAllowed(req.get("origin"))) {
+		res.status(403).json({ error: "Request origin is not allowed" });
+		return;
+	}
+	const now = Date.now();
+	const key = req.ip || req.socket.remoteAddress || "unknown";
+	const attempts = loginAttempts.get(key);
+	if (attempts && attempts.resetAt > now && attempts.count >= LOGIN_MAX_ATTEMPTS) {
+		res.status(429).json({ error: "Too many login attempts. Try again later." });
+		return;
+	}
+	if (!attempts || attempts.resetAt <= now) {
+		loginAttempts.set(key, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
+	} else {
+		attempts.count += 1;
+	}
 	const configuredPassword = process.env.ADMIN_PASSWORD;
 	const providedPassword = typeof req.body?.password === "string" ? req.body.password : "";
 	if (!configuredPassword || !process.env.AUTH_SECRET) {
@@ -66,6 +98,7 @@ router.post("/auth/login", (req, res): void => {
 		res.status(401).json({ error: "Username or password is incorrect" });
 		return;
 	}
+	loginAttempts.delete(key);
 
 	const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
 	const token = `${expiresAt}.${sign(String(expiresAt))}`;
