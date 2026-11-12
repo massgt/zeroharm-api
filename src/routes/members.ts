@@ -16,8 +16,17 @@ import {
 	SetMemberActiveBody,
 	SetMemberActiveResponse,
 } from "../api-zod/index.js";
+import { requireAdmin } from "./auth.js";
 
 const router: IRouter = Router();
+
+router.use((req, res, next) => {
+	if (req.method === "GET" || req.method === "HEAD") {
+		next();
+		return;
+	}
+	requireAdmin(req, res, next);
+});
 
 router.get("/members", async (_req, res): Promise<void> => {
 	const members = await db
