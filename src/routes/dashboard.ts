@@ -7,6 +7,7 @@ import {
 	reportEntriesTable,
 	excelUploadsTable,
 } from "../db/index.js";
+import { isAdminRequest } from "./auth.js";
 import {
 	GetDashboardQueryParams,
 	GetDashboardResponse,
