@@ -16,8 +16,17 @@ import {
 	safetyCampaignImagesTable,
 	insertSafetyCampaignSchema,
 } from "../db/schema/index.js";
+import { requireAdmin } from "./auth.js";
 
 const router = Router();
+
+router.use((req, res, next) => {
+	if (req.method === "GET" || req.method === "HEAD") {
+		next();
+		return;
+	}
+	requireAdmin(req, res, next);
+});
 
 const campaignUpload = multer({
 	storage: multer.memoryStorage(),
