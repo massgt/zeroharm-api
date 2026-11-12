@@ -31,6 +31,10 @@ function verifySession(token: string | undefined): boolean {
 	return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
+export function isAdminRequest(req: { cookies?: Record<string, string> }): boolean {
+	return verifySession(req.cookies?.[COOKIE_NAME]);
+}
+
 export const requireAdmin: RequestHandler = (req, res, next) => {
 	try {
 		if (!verifySession(req.cookies?.[COOKIE_NAME])) {
