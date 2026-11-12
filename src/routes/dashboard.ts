@@ -449,9 +449,14 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 	});
 
 	if (!isAdminRequest(req)) {
-		response.members = response.members
-			.filter((member) => !member.isOnLeave)
-			.map(({ nik: _nik, isOnLeave: _isOnLeave, ...member }) => member);
+		const viewerResponse = {
+			...response,
+			members: response.members
+				.filter((member) => !member.isOnLeave)
+				.map(({ nik: _nik, isOnLeave: _isOnLeave, ...member }) => member),
+		};
+		res.json(viewerResponse);
+		return;
 	}
 
 	res.json(response);
