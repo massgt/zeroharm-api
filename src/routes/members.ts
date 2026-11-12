@@ -16,7 +16,7 @@ import {
 	SetMemberActiveBody,
 	SetMemberActiveResponse,
 } from "../api-zod/index.js";
-import { requireAdmin } from "./auth.js";
+import { isAdminRequest, requireAdmin } from "./auth.js";
 
 const router: IRouter = Router();
 
@@ -28,12 +28,28 @@ router.use((req, res, next) => {
 	requireAdmin(req, res, next);
 });
 
-router.get("/members", async (_req, res): Promise<void> => {
+router.get("/members", async (req, res): Promise<void> => {
+	if (!isAdminRequest(req)) {
+		const members = await db
+			.select({
+				name: teamMembersTable.name,
+				department: teamMembersTable.department,
+				jabatan: teamMembersTable.jabatan,
+				isPjo: teamMembersTable.isPjo,
+				isHse: teamMembersTable.isHse,
+				isActive: teamMembersTable.isActive,
+				isSapParticipant: teamMembersTable.isSapParticipant,
+			})
+			.from(teamMembersTable)
+			.orderBy(teamMembersTable.name);
+		res.json(members);
+		return;
+	}
+
 	const members = await db
 		.select()
 		.from(teamMembersTable)
 		.orderBy(teamMembersTable.name);
-
 	res.json(ListMembersResponse.parse(members));
 });
 
