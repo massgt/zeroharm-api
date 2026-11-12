@@ -9,8 +9,17 @@ import {
 	attendanceRecordsTable,
 	excelUploadsTable,
 } from "../db/index.js";
+import { requireAdmin } from "./auth.js";
 
 const router: IRouter = Router();
+
+router.use((req, res, next) => {
+	if (req.method === "GET" || req.method === "HEAD") {
+		next();
+		return;
+	}
+	requireAdmin(req, res, next);
+});
 
 const upload = multer({
 	dest: "/tmp",
