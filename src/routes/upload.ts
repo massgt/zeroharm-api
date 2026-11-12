@@ -44,7 +44,11 @@ import { requireAdmin } from "./auth.js";
 
 const router: IRouter = Router();
 
-router.use((req, res, next) => {
+// Lindungi hanya endpoint upload dan daftar upload.
+// Jangan pasang middleware ini ke seluruh router karena router ini juga
+// dilewati oleh endpoint lain seperti GET /weeks dan GET /dashboard.
+router.use("/upload", requireAdmin);
+router.use("/uploads", (req, res, next) => {
 	if (req.method === "GET" && req.path === "/uploads/latest") {
 		next();
 		return;
