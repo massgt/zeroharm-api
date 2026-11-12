@@ -32,7 +32,11 @@ function verifySession(token: string | undefined): boolean {
 }
 
 export function isAdminRequest(req: { cookies?: Record<string, string> }): boolean {
-	return verifySession(req.cookies?.[COOKIE_NAME]);
+	try {
+		return verifySession(req.cookies?.[COOKIE_NAME]);
+	} catch {
+		return false;
+	}
 }
 
 export const requireAdmin: RequestHandler = (req, res, next) => {
