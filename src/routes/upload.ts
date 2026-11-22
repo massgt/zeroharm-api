@@ -910,23 +910,21 @@ async function reconcileBeforeUpload(
 		entriesByUpload.set(entry.uploadId, rows);
 	}
 
+	const fullDeleteUploadIds: number[] = [];
+	const partialDeleteUploadIds: number[] = [];
+
 	for (const previousUpload of previousUploads) {
 		const sameGoogleSheet =
 			options.sourceType === "google_sheet" &&
 			previousUpload.sourceType === "google_sheet" &&
 			previousUpload.sourceId === options.sourceId;
 
-		// Sinkronisasi ulang spreadsheet yang sama.
 		if (sameGoogleSheet) {
-			await tx
-				.delete(reportEntriesTable)
-				.where(eq(reportEntriesTable.uploadId, previousUpload.id));
-
+			fullDeleteUploadIds.push(previousUpload.id);
 			continue;
 		}
 
 		const rows = entriesByUpload.get(previousUpload.id);
-
 		if (!rows?.length) continue;
 
 		const previousLatestPeriod = rows.reduce(
@@ -934,31 +932,35 @@ async function reconcileBeforeUpload(
 			Number.NEGATIVE_INFINITY,
 		);
 
-		// Jangan menghapus data yang lebih baru.
 		if (previousLatestPeriod > newLatestPeriod) continue;
-
-		// Periode sama: ganti data upload sebelumnya.
 		if (previousLatestPeriod === newLatestPeriod) {
-			await tx
-				.delete(reportEntriesTable)
-				.where(eq(reportEntriesTable.uploadId, previousUpload.id));
-
+			fullDeleteUploadIds.push(previousUpload.id);
 			continue;
 		}
 
-		// Periode lama: hapus sekaligus, tetapi pertahankan
-		// minggu yang masih digunakan oleh periode terbaru.
 		if (newWeeks.length > 0) {
-			await tx
-				.delete(reportEntriesTable)
-				.where(
-					and(
-						eq(reportEntriesTable.uploadId, previousUpload.id),
-						sql`(${reportEntriesTable.year} * 100 + ${reportEntriesTable.month}) < ${newLatestPeriod}`,
-						notInArray(reportEntriesTable.week, newWeeks),
-					),
-				);
+			partialDeleteUploadIds.push(previousUpload.id);
 		}
+	}
+
+	// Hapus semua upload yang harus diganti dalam satu query.
+	if (fullDeleteUploadIds.length > 0) {
+		await tx
+			.delete(reportEntriesTable)
+			.where(inArray(reportEntriesTable.uploadId, fullDeleteUploadIds));
+	}
+
+	// Untuk periode lama, pertahankan minggu yang masih digunakan.
+	if (partialDeleteUploadIds.length > 0 && newWeeks.length > 0) {
+		await tx
+			.delete(reportEntriesTable)
+			.where(
+				and(
+					inArray(reportEntriesTable.uploadId, partialDeleteUploadIds),
+					sql`(${reportEntriesTable.year} * 100 + ${reportEntriesTable.month}) < ${newLatestPeriod}`,
+					notInArray(reportEntriesTable.week, newWeeks),
+				),
+			);
 	}
 }
 
@@ -1014,23 +1016,21 @@ async function reconcileAttendanceBeforeUpload(
 		entriesByUpload.set(entry.uploadId, rows);
 	}
 
+	const fullDeleteUploadIds: number[] = [];
+	const partialDeleteUploadIds: number[] = [];
+
 	for (const previousUpload of previousUploads) {
 		const sameGoogleSheet =
 			options.sourceType === "google_sheet" &&
 			previousUpload.sourceType === "google_sheet" &&
 			previousUpload.sourceId === options.sourceId;
 
-		// Sinkronisasi ulang spreadsheet yang sama.
 		if (sameGoogleSheet) {
-			await tx
-				.delete(attendanceRecordsTable)
-				.where(eq(attendanceRecordsTable.uploadId, previousUpload.id));
-
+			fullDeleteUploadIds.push(previousUpload.id);
 			continue;
 		}
 
 		const rows = entriesByUpload.get(previousUpload.id);
-
 		if (!rows?.length) continue;
 
 		const previousLatestPeriod = rows.reduce(
@@ -1038,31 +1038,35 @@ async function reconcileAttendanceBeforeUpload(
 			Number.NEGATIVE_INFINITY,
 		);
 
-		// Jangan menghapus data yang lebih baru.
 		if (previousLatestPeriod > newLatestPeriod) continue;
-
-		// Periode sama: ganti data upload sebelumnya.
 		if (previousLatestPeriod === newLatestPeriod) {
-			await tx
-				.delete(attendanceRecordsTable)
-				.where(eq(attendanceRecordsTable.uploadId, previousUpload.id));
-
+			fullDeleteUploadIds.push(previousUpload.id);
 			continue;
 		}
 
-		// Periode lama: hapus sekaligus dan pertahankan
-		// minggu lintas bulan yang masih ada di upload terbaru.
 		if (newWeeks.length > 0) {
-			await tx
-				.delete(attendanceRecordsTable)
-				.where(
-					and(
-						eq(attendanceRecordsTable.uploadId, previousUpload.id),
-						sql`(${attendanceRecordsTable.year} * 100 + ${attendanceRecordsTable.month}) < ${newLatestPeriod}`,
-						notInArray(attendanceRecordsTable.week, newWeeks),
-					),
-				);
+			partialDeleteUploadIds.push(previousUpload.id);
 		}
+	}
+
+	// Hapus semua upload yang harus diganti dalam satu query.
+	if (fullDeleteUploadIds.length > 0) {
+		await tx
+			.delete(attendanceRecordsTable)
+			.where(inArray(attendanceRecordsTable.uploadId, fullDeleteUploadIds));
+	}
+
+	// Untuk periode lama, pertahankan minggu yang masih digunakan.
+	if (partialDeleteUploadIds.length > 0 && newWeeks.length > 0) {
+		await tx
+			.delete(attendanceRecordsTable)
+			.where(
+				and(
+					inArray(attendanceRecordsTable.uploadId, partialDeleteUploadIds),
+					sql`(${attendanceRecordsTable.year} * 100 + ${attendanceRecordsTable.month}) < ${newLatestPeriod}`,
+					notInArray(attendanceRecordsTable.week, newWeeks),
+				),
+			);
 	}
 }
 
