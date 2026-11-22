@@ -749,6 +749,28 @@ async function parseGoogleSheet(spreadsheetId: string): Promise<{
 	};
 }
 
+type UploadProgressStageStatus =
+	| "pending"
+	| "processing"
+	| "completed"
+	| "failed";
+
+type UploadProgressUpdate = {
+	progress: number;
+	message: string;
+	stageId: string;
+	stageStatus: UploadProgressStageStatus;
+};
+
+type UploadProgressCallback = (update: UploadProgressUpdate) => void;
+
+function emitUploadProgress(
+	res: { write: (data: string) => unknown },
+	update: UploadProgressUpdate,
+) {
+	res.write(`${JSON.stringify(update)}\n`);
+}
+
 function logUploadStage(
 	stage: string,
 	startedAt: number,
@@ -768,6 +790,7 @@ function logUploadStage(
 async function saveGoogleSheetData(
 	spreadsheetId: string,
 	sourceUrl: string,
+	onProgress?: UploadProgressCallback,
 ): Promise<{
 	uploadId: number;
 	entries: number;
@@ -780,11 +803,25 @@ async function saveGoogleSheetData(
 	// ==========================================
 	const totalStartedAt = performance.now();
 
+	onProgress?.({
+		progress: 5,
+		message: "Menghubungkan ke Google Sheet...",
+		stageId: "read",
+		stageStatus: "processing",
+	});
+
 	// 1. PARSE GOOGLE SHEETS
 	const parseStartedAt = performance.now();
 
 	logUploadStage("google_sheet_parse_started", parseStartedAt, {
 		spreadsheetId,
+	});
+
+	onProgress?.({
+		progress: 10,
+		message: "Sedang membaca sumber data Google Sheet...",
+		stageId: "read",
+		stageStatus: "processing",
 	});
 
 	const entries: ParsedEntry[] = [];
@@ -799,6 +836,13 @@ async function saveGoogleSheetData(
 		attendanceEntries: result.attendanceEntries.length,
 		rowsProcessed: result.rowsProcessed,
 		sheetsProcessed: result.sheetsProcessed,
+	});
+
+	onProgress?.({
+		progress: 25,
+		message: "Pembacaan selesai. Memvalidasi data...",
+		stageId: "parse",
+		stageStatus: "completed",
 	});
 
 	// ==========================================
@@ -832,6 +876,7 @@ async function saveGoogleSheetData(
 			sourceId: spreadsheetId,
 		},
 		result.attendanceEntries,
+		onProgress,
 	);
 
 	logUploadStage("google_sheet_save_completed", saveStartedAt, {
@@ -1080,6 +1125,7 @@ async function saveParsedEntries(
 		sourceId?: string;
 	},
 	attendanceEntries: ParsedAttendanceEntry[] = [],
+	onProgress?: UploadProgressCallback,
 ) {
 	const totalStartedAt = performance.now();
 
@@ -1122,6 +1168,13 @@ async function saveParsedEntries(
 
 	const BATCH = 500;
 
+	onProgress?.({
+		progress: 40,
+		message: "Sedang melakukan rekonsiliasi data...",
+		stageId: "reconcile",
+		stageStatus: "processing",
+	});
+
 	// 3. DATABASE TRANSACTION
 	const transactionStartedAt = performance.now();
 	logUploadStage("database_transaction_started", transactionStartedAt, {
@@ -1161,6 +1214,12 @@ async function saveParsedEntries(
 			});
 
 			logUploadStage("reconcile_attendance", reconcileAttendanceStartedAt);
+			onProgress?.({
+				progress: 60,
+				message: "Rekonsiliasi data selesai. Menyiapkan penyimpanan SAP...",
+				stageId: "reconcile",
+				stageStatus: "completed",
+			});
 
 			// C. INSERT METADATA
 			const metadataStartedAt = performance.now();
@@ -1185,6 +1244,12 @@ async function saveParsedEntries(
 			});
 
 			// D. INSERT SAP
+			onProgress?.({
+				progress: 65,
+				message: "Sedang menyimpan data SAP...",
+				stageId: "insert_sap",
+				stageStatus: "processing",
+			});
 			const toInsertSAP = deduped.map((e) => ({
 				uploadId: uploadRecord.id,
 				sourceId: e.sourceId,
@@ -1226,6 +1291,12 @@ async function saveParsedEntries(
 				totalRows: toInsertSAP.length,
 				batches: sapBatches,
 			});
+			onProgress?.({
+				progress: 82,
+				message: "Penyimpanan data SAP selesai.",
+				stageId: "insert_sap",
+				stageStatus: "completed",
+			});
 
 			// E. INSERT ATTENDANCE
 			const toInsertAttendance = dedupedAttendance.map((e) => ({
@@ -1238,7 +1309,12 @@ async function saveParsedEntries(
 				year: e.year,
 				sourceFile: options.filename,
 			}));
-
+			onProgress?.({
+				progress: 85,
+				message: "Sedang menyimpan data Attendance...",
+				stageId: "insert_attendance",
+				stageStatus: "processing",
+			});
 			const insertAttendanceStartedAt = performance.now();
 			let attendanceBatches = 0;
 
@@ -1269,6 +1345,13 @@ async function saveParsedEntries(
 				batches: attendanceBatches,
 			});
 
+			onProgress?.({
+				progress: 95,
+				message: "Penyimpanan data Attendance selesai.",
+				stageId: "insert_attendance",
+				stageStatus: "completed",
+			});
+
 			return {
 				uploadId: uploadRecord.id,
 			};
@@ -1276,6 +1359,13 @@ async function saveParsedEntries(
 
 		logUploadStage("database_transaction_completed", transactionStartedAt, {
 			uploadId: result.uploadId,
+		});
+
+		onProgress?.({
+			progress: 99,
+			message: "Finalisasi upload...",
+			stageId: "finalize",
+			stageStatus: "processing",
 		});
 
 		logUploadStage("save_parsed_entries_completed", totalStartedAt, {
@@ -1449,7 +1539,18 @@ router.post("/upload/google-sheet", async (req, res): Promise<void> => {
 
 		req.log.info({ spreadsheetId }, "Processing Google Spreadsheet upload");
 
-		const result = await saveGoogleSheetData(spreadsheetId, url);
+		// Aktifkan streaming response
+		res.status(200);
+		res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+		res.setHeader("Cache-Control", "no-cache, no-transform");
+		res.setHeader("Connection", "keep-alive");
+		res.setHeader("X-Accel-Buffering", "no");
+		res.flushHeaders();
+
+		// Proses Google Sheet dan kirim progress ke frontend
+		const result = await saveGoogleSheetData(spreadsheetId, url, (update) =>
+			emitUploadProgress(res, update),
+		);
 
 		req.log.info(
 			{
@@ -1461,21 +1562,45 @@ router.post("/upload/google-sheet", async (req, res): Promise<void> => {
 			"Google Spreadsheet processed",
 		);
 
-		res.json({
-			success: true,
-			sourceType: "google_sheet",
-			uploadId: result.uploadId,
-			spreadsheetId,
-			weeksFound: result.weeksFound,
-			rowsProcessed: result.rowsProcessed,
-			minergoRows: result.entries,
+		// Kirim progress 100% setelah proses berhasil
+		emitUploadProgress(res, {
+			progress: 100,
+			message: "Upload Google Sheet berhasil.",
+			stageId: "finalize",
+			stageStatus: "completed",
 		});
+
+		// Kirim hasil akhir
+		res.write(
+			`${JSON.stringify({
+				event: "complete",
+				success: true,
+				sourceType: "google_sheet",
+				uploadId: result.uploadId,
+				spreadsheetId,
+				weeksFound: result.weeksFound,
+				rowsProcessed: result.rowsProcessed,
+				minergoRows: result.entries,
+			})}\n`,
+		);
+
+		res.end();
 	} catch (err) {
 		req.log.error({ err }, "Google Spreadsheet upload failed");
 
-		res.status(500).json({
-			error: String(err),
-		});
+		if (res.headersSent) {
+			res.write(
+				`${JSON.stringify({
+					event: "error",
+					error: err instanceof Error ? err.message : String(err),
+				})}\n`,
+			);
+			res.end();
+		} else {
+			res.status(500).json({
+				error: String(err),
+			});
+		}
 	}
 });
 
@@ -1559,6 +1684,25 @@ router.post("/upload/excel-chunked", async (req, res): Promise<void> => {
 			return;
 		}
 
+		// Aktifkan streaming response
+		res.status(200);
+		res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+		res.setHeader("Cache-Control", "no-cache, no-transform");
+		res.setHeader("Connection", "keep-alive");
+		res.setHeader("X-Accel-Buffering", "no");
+		res.flushHeaders();
+
+		const sendProgress = (update: UploadProgressUpdate) => {
+			emitUploadProgress(res, update);
+		};
+
+		sendProgress({
+			progress: 5,
+			message: "Menyiapkan file Excel...",
+			stageId: "read",
+			stageStatus: "processing",
+		});
+
 		chunkPaths = Array.from(
 			{ length: totalChunks },
 			(_, index) => `excel/${sessionId}/${index}.part`,
@@ -1585,8 +1729,29 @@ router.post("/upload/excel-chunked", async (req, res): Promise<void> => {
 			});
 		}
 
+		sendProgress({
+			progress: 10,
+			message: "File Excel berhasil disiapkan. Memulai parsing...",
+			stageId: "read",
+			stageStatus: "completed",
+		});
+
+		sendProgress({
+			progress: 15,
+			message: "Sedang membaca dan memvalidasi file Excel...",
+			stageId: "parse",
+			stageStatus: "processing",
+		});
+
 		const { entries, attendanceEntries, rowsProcessed } =
 			await parseExcelStreaming(tempFilePath);
+
+		sendProgress({
+			progress: 25,
+			message: "Parsing selesai. Menyiapkan penyimpanan data...",
+			stageId: "parse",
+			stageStatus: "completed",
+		});
 
 		const result = await saveParsedEntries(
 			entries,
@@ -1596,6 +1761,7 @@ router.post("/upload/excel-chunked", async (req, res): Promise<void> => {
 				sourceType: "manual",
 			},
 			attendanceEntries,
+			sendProgress,
 		);
 
 		req.log.info(
@@ -1607,19 +1773,42 @@ router.post("/upload/excel-chunked", async (req, res): Promise<void> => {
 			"Chunked Excel upload processed",
 		);
 
-		res.json({
-			success: true,
-			uploadId: result.uploadId,
-			weeksFound: result.weeksFound,
-			rowsProcessed: result.rowsProcessed,
-			minergoRows: result.minergoRows,
+		sendProgress({
+			progress: 100,
+			message: "Upload Excel berhasil.",
+			stageId: "finalize",
+			stageStatus: "completed",
 		});
+
+		res.write(
+			`${JSON.stringify({
+				event: "complete",
+				success: true,
+				sourceType: "manual",
+				uploadId: result.uploadId,
+				weeksFound: result.weeksFound,
+				rowsProcessed: result.rowsProcessed,
+				minergoRows: result.minergoRows,
+			})}\n`,
+		);
+
+		res.end();
 	} catch (err) {
 		req.log.error({ err }, "Chunked Excel upload failed");
 
-		res.status(500).json({
-			error: String(err),
-		});
+		if (res.headersSent) {
+			res.write(
+				`${JSON.stringify({
+					event: "error",
+					error: err instanceof Error ? err.message : String(err),
+				})}\n`,
+			);
+			res.end();
+		} else {
+			res.status(500).json({
+				error: String(err),
+			});
+		}
 	} finally {
 		if (chunkPaths.length > 0) {
 			await deleteExcelChunks(chunkPaths).catch((cleanupError) => {
