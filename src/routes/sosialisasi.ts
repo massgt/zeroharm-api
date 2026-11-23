@@ -669,6 +669,12 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 				excelUploadsTable,
 				eq(attendanceUploadLinksTable.uploadId, excelUploadsTable.id),
 			)
+			.where(
+				and(
+					eq(attendanceRecordsTable.year, year),
+					eq(attendanceRecordsTable.month, month),
+				),
+			)
 			.orderBy(desc(excelUploadsTable.uploadedAt))
 			.limit(1);
 
