@@ -6,3 +6,8 @@ credentials/
 # Local database backups
 *.dump
 zeroharm-dev-backup.dump
+
+# Local development files
+node_modules/
+*.tsbuildinfo
+.DS_Store
