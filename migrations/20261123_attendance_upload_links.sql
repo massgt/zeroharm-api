@@ -1,5 +1,5 @@
 -- Attendance many-to-many upload relationship.
--- Safe to run once on the target database after deploying the matching API code.
+-- Run once on the target database before deploying the API code that uses the new links.
 BEGIN;
 
 ALTER TABLE attendance_records
