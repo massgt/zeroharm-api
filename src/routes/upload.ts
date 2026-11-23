@@ -14,6 +14,7 @@ import {
 	reportEntriesTable,
 	teamMembersTable,
 	attendanceRecordsTable,
+	attendanceUploadLinksTable,
 } from "../db/index.js";
 
 import { ListUploadsResponse } from "../api-zod/index.js";
@@ -1009,6 +1010,15 @@ async function reconcileBeforeUpload(
 	}
 }
 
+async function deleteOrphanAttendanceRecords(tx: DbTransaction) {
+	await tx.execute(sql`DELETE FROM attendance_records ar
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM attendance_upload_links aul
+			WHERE aul.attendance_id = ar.id
+		)`);
+}
+
 async function reconcileAttendanceBeforeUpload(
 	tx: DbTransaction,
 	attendanceEntries: ParsedAttendanceEntry[],
@@ -1023,10 +1033,8 @@ async function reconcileAttendanceBeforeUpload(
 		(max, entry) => Math.max(max, entry.year * 100 + entry.month),
 		Number.NEGATIVE_INFINITY,
 	);
-
 	const newWeeks = [...new Set(attendanceEntries.map((entry) => entry.week))];
 
-	// Ambil metadata upload melalui transaksi yang sama.
 	const previousUploads = await tx
 		.select({
 			id: excelUploadsTable.id,
@@ -1036,25 +1044,28 @@ async function reconcileAttendanceBeforeUpload(
 		.from(excelUploadsTable);
 
 	const uploadIds = previousUploads.map((upload) => upload.id);
-
 	if (uploadIds.length === 0) return;
 
-	// Ambil kombinasi periode dan minggu yang unik saja.
+	// Resolve each upload's Attendance periods through the many-to-many links.
 	const previousEntries = await tx
 		.selectDistinct({
-			uploadId: attendanceRecordsTable.uploadId,
+			linkId: attendanceUploadLinksTable.id,
+			uploadId: attendanceUploadLinksTable.uploadId,
 			week: attendanceRecordsTable.week,
 			month: attendanceRecordsTable.month,
 			year: attendanceRecordsTable.year,
 		})
-		.from(attendanceRecordsTable)
-		.where(inArray(attendanceRecordsTable.uploadId, uploadIds));
+		.from(attendanceUploadLinksTable)
+		.innerJoin(
+			attendanceRecordsTable,
+			eq(attendanceUploadLinksTable.attendanceId, attendanceRecordsTable.id),
+		)
+		.where(inArray(attendanceUploadLinksTable.uploadId, uploadIds));
 
 	const entriesByUpload = new Map<
 		number,
-		{ week: string; month: number; year: number }[]
+		{ linkId: number; week: string; month: number; year: number }[]
 	>();
-
 	for (const entry of previousEntries) {
 		const rows = entriesByUpload.get(entry.uploadId) ?? [];
 		rows.push(entry);
@@ -1063,7 +1074,6 @@ async function reconcileAttendanceBeforeUpload(
 
 	const fullDeleteUploadIds: number[] = [];
 	const partialDeleteUploadIds: number[] = [];
-
 	for (const previousUpload of previousUploads) {
 		const sameGoogleSheet =
 			options.sourceType === "google_sheet" &&
@@ -1082,37 +1092,45 @@ async function reconcileAttendanceBeforeUpload(
 			(max, entry) => Math.max(max, entry.year * 100 + entry.month),
 			Number.NEGATIVE_INFINITY,
 		);
-
 		if (previousLatestPeriod > newLatestPeriod) continue;
 		if (previousLatestPeriod === newLatestPeriod) {
 			fullDeleteUploadIds.push(previousUpload.id);
 			continue;
 		}
-
-		if (newWeeks.length > 0) {
-			partialDeleteUploadIds.push(previousUpload.id);
-		}
+		if (newWeeks.length > 0) partialDeleteUploadIds.push(previousUpload.id);
 	}
 
-	// Hapus semua upload yang harus diganti dalam satu query.
+	// Remove only the replaced upload relationships. Shared Attendance rows survive.
 	if (fullDeleteUploadIds.length > 0) {
 		await tx
-			.delete(attendanceRecordsTable)
-			.where(inArray(attendanceRecordsTable.uploadId, fullDeleteUploadIds));
+			.delete(attendanceUploadLinksTable)
+			.where(inArray(attendanceUploadLinksTable.uploadId, fullDeleteUploadIds));
 	}
 
-	// Untuk periode lama, pertahankan minggu yang masih digunakan.
 	if (partialDeleteUploadIds.length > 0 && newWeeks.length > 0) {
-		await tx
-			.delete(attendanceRecordsTable)
+		const obsoleteLinks = await tx
+			.select({ id: attendanceUploadLinksTable.id })
+			.from(attendanceUploadLinksTable)
+			.innerJoin(
+				attendanceRecordsTable,
+				eq(attendanceUploadLinksTable.attendanceId, attendanceRecordsTable.id),
+			)
 			.where(
 				and(
-					inArray(attendanceRecordsTable.uploadId, partialDeleteUploadIds),
+					inArray(attendanceUploadLinksTable.uploadId, partialDeleteUploadIds),
 					sql`(${attendanceRecordsTable.year} * 100 + ${attendanceRecordsTable.month}) < ${newLatestPeriod}`,
 					notInArray(attendanceRecordsTable.week, newWeeks),
 				),
 			);
+
+		if (obsoleteLinks.length > 0) {
+			await tx
+				.delete(attendanceUploadLinksTable)
+				.where(inArray(attendanceUploadLinksTable.id, obsoleteLinks.map((link) => link.id)));
+		}
 	}
+
+	await deleteOrphanAttendanceRecords(tx);
 }
 
 async function saveParsedEntries(
@@ -1298,7 +1316,7 @@ async function saveParsedEntries(
 				stageStatus: "completed",
 			});
 
-			// E. INSERT ATTENDANCE
+			// E. INSERT ATTENDANCE AND LINK EACH RECORD TO THIS UPLOAD
 			const toInsertAttendance = dedupedAttendance.map((e) => ({
 				uploadId: uploadRecord.id,
 				nik: e.nik,
@@ -1317,34 +1335,59 @@ async function saveParsedEntries(
 			});
 			const insertAttendanceStartedAt = performance.now();
 			let attendanceBatches = 0;
+			let attendanceLinksCreated = 0;
 
 			for (let i = 0; i < toInsertAttendance.length; i += BATCH) {
 				const batchStartedAt = performance.now();
+				const batch = toInsertAttendance.slice(i, i + BATCH);
 
-				// LOG SEBELUM INSERT ATTENDANCE
 				logUploadStage("insert_attendance_batch_started", batchStartedAt, {
 					batch: attendanceBatches + 1,
-					batchRows: Math.min(BATCH, toInsertAttendance.length - i),
+					batchRows: batch.length,
 				});
 
+				// Insert only new unique events; existing events are resolved below.
 				await tx
 					.insert(attendanceRecordsTable)
-					.values(toInsertAttendance.slice(i, i + BATCH))
+					.values(batch)
 					.onConflictDoNothing();
 
-				attendanceBatches++;
+				// Resolve IDs for both newly inserted and previously existing events.
+				const tuples = batch.map((entry) =>
+					sql`(${entry.nik}, ${entry.eventDate}::date, ${entry.eventType}, ${entry.week}, ${entry.month}, ${entry.year})`,
+				);
+				const matchedRecords = await tx
+					.select({ id: attendanceRecordsTable.id })
+					.from(attendanceRecordsTable)
+					.where(
+						sql`(${attendanceRecordsTable.nik}, ${attendanceRecordsTable.eventDate}, ${attendanceRecordsTable.eventType}, ${attendanceRecordsTable.week}, ${attendanceRecordsTable.month}, ${attendanceRecordsTable.year}) IN (${sql.join(tuples, sql`, `)})`,
+					);
 
+				if (matchedRecords.length > 0) {
+					const links = matchedRecords.map((record) => ({
+						attendanceId: record.id,
+						uploadId: uploadRecord.id,
+					}));
+					await tx
+						.insert(attendanceUploadLinksTable)
+						.values(links)
+						.onConflictDoNothing();
+					attendanceLinksCreated += links.length;
+				}
+
+				attendanceBatches++;
 				logUploadStage("insert_attendance_batch", batchStartedAt, {
 					batch: attendanceBatches,
-					batchRows: Math.min(BATCH, toInsertAttendance.length - i),
+					batchRows: batch.length,
+					matchedRecords: matchedRecords.length,
 				});
 			}
 
 			logUploadStage("insert_attendance_total", insertAttendanceStartedAt, {
 				totalRows: toInsertAttendance.length,
 				batches: attendanceBatches,
+				linksCreated: attendanceLinksCreated,
 			});
-
 			onProgress?.({
 				progress: 95,
 				message: "Penyimpanan data Attendance selesai.",
@@ -1909,10 +1952,11 @@ router.delete("/uploads/:id", async (req, res): Promise<void> => {
 				.delete(reportEntriesTable)
 				.where(eq(reportEntriesTable.uploadId, uploadId));
 
-			// Hapus data Attendance
+			// Remove this upload's links, then delete only orphan Attendance rows.
 			await tx
-				.delete(attendanceRecordsTable)
-				.where(eq(attendanceRecordsTable.uploadId, uploadId));
+				.delete(attendanceUploadLinksTable)
+				.where(eq(attendanceUploadLinksTable.uploadId, uploadId));
+			await deleteOrphanAttendanceRecords(tx);
 
 			// Hapus metadata upload
 			await tx

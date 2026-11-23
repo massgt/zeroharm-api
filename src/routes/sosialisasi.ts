@@ -7,6 +7,7 @@ import {
 	db,
 	teamMembersTable,
 	attendanceRecordsTable,
+	attendanceUploadLinksTable,
 	excelUploadsTable,
 } from "../db/index.js";
 import { isAdminRequest, requireAdmin } from "./auth.js";
@@ -659,10 +660,14 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 				filename: excelUploadsTable.filename,
 				sourceType: excelUploadsTable.sourceType,
 			})
-			.from(attendanceRecordsTable)
+			.from(attendanceUploadLinksTable)
+			.innerJoin(
+				attendanceRecordsTable,
+				eq(attendanceUploadLinksTable.attendanceId, attendanceRecordsTable.id),
+			)
 			.innerJoin(
 				excelUploadsTable,
-				eq(attendanceRecordsTable.uploadId, excelUploadsTable.id),
+				eq(attendanceUploadLinksTable.uploadId, excelUploadsTable.id),
 			)
 			.orderBy(desc(excelUploadsTable.uploadedAt))
 			.limit(1);
