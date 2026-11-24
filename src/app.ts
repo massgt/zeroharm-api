@@ -40,6 +40,10 @@ const isDashboardPreviewOrigin = (origin: string) =>
 		origin,
 	);
 
+const isDashboardProductionOrigin = (origin: string) =>
+	process.env.VERCEL_ENV === "production" &&
+	origin === "https://m-safe.vercel.app";
+
 app.use(
 	cors({
 		credentials: true,
@@ -47,7 +51,8 @@ app.use(
 			if (
 				!origin ||
 				allowedOrigins.includes(origin) ||
-				isDashboardPreviewOrigin(origin)
+				isDashboardPreviewOrigin(origin) ||
+				isDashboardProductionOrigin(origin)
 			) {
 				callback(null, true);
 				return;
