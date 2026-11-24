@@ -68,7 +68,8 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 				res.json({
 					success: true,
 					period: null,
-					targetPerMonth: TARGET_PER_MONTH,
+						targetPerMonth: TARGET_PER_MONTH,
+						weeks: [],
 					lastUpdate: null,
 					summary: null,
 					employees: [],
@@ -152,13 +153,30 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 			.where(eq(teamMembersTable.isActive, true))
 			.orderBy(teamMembersTable.name);
 
-		const countByNik = new Map<string, number>();
 		const relevantAttendance = attendance.filter((event) =>
 			SAFETY_TALK_TYPES.has(normalizeEventType(event.eventType)),
 		);
 
+		// Minggu ditampilkan sebagai kolom pendukung untuk laporan weekly,
+		// sedangkan denominator setiap kolom tetap target bulanan (4 kali).
+		const weeks = Array.from(
+			new Set(attendance.map((event) => event.week.trim()).filter(Boolean)),
+		).sort((a, b) => {
+			const aNumber = Number(a);
+			const bNumber = Number(b);
+			return Number.isFinite(aNumber) && Number.isFinite(bNumber)
+				? aNumber - bNumber
+				: a.localeCompare(b, "id");
+		});
+
+		const countByNik = new Map<string, number>();
+		const weeklyCountByNik = new Map<string, Map<string, number>>();
+
 		for (const event of relevantAttendance) {
 			countByNik.set(event.nik, (countByNik.get(event.nik) ?? 0) + 1);
+			const perWeek = weeklyCountByNik.get(event.nik) ?? new Map<string, number>();
+			perWeek.set(event.week, (perWeek.get(event.week) ?? 0) + 1);
+			weeklyCountByNik.set(event.nik, perWeek);
 		}
 
 		const employees = members.map((member) => {
@@ -167,6 +185,14 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 				(totalCount / TARGET_PER_MONTH) * 100,
 				100,
 			);
+			const weekly = weeks.map((week) => {
+				const count = weeklyCountByNik.get(member.nik)?.get(week) ?? 0;
+				return {
+					week,
+					count,
+					progress: Math.min((count / TARGET_PER_MONTH) * 100, 100),
+				};
+			});
 
 			return {
 				nik: member.nik,
@@ -178,6 +204,7 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 				target: TARGET_PER_MONTH,
 				totalCount,
 				totalProgress,
+				weekly,
 				status: member.isOnLeave
 					? "Cuti"
 					: totalProgress >= 100
@@ -205,6 +232,16 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 				? Math.round((value / eligible.length) * 10000) / 100
 				: 0;
 
+		const weeklyAchievement = weeks.map((week) => {
+			const average = eligible.length
+				? eligible.reduce((sum, employee) => {
+						const item = employee.weekly.find((entry) => entry.week === week);
+						return sum + (item?.progress ?? 0);
+					}, 0) / eligible.length
+				: 0;
+			return { week, achievement: Math.round(average * 100) / 100 };
+		});
+
 		const summary = {
 			totalActive: employees.length,
 			eligibleEmployees: eligible.length,
@@ -213,6 +250,7 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 			partial,
 			belum,
 			achievement: achievement(complete),
+			weeklyAchievement,
 			totalEvents: relevantAttendance.length,
 			uniqueNiks: new Set(relevantAttendance.map((event) => event.nik)).size,
 		};
@@ -221,6 +259,7 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 			success: true,
 			period: { year, month },
 			targetPerMonth: TARGET_PER_MONTH,
+			weeks,
 			lastUpdate: lastUpdate
 				? {
 						uploadedAt: lastUpdate.uploadedAt.toISOString(),
