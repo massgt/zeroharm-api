@@ -304,13 +304,18 @@ export async function parseGoogleDriveXlsx(
 					const eventType = text(row.getCell(4).value);
 
 					const allowedEventTypes = [
+						"SAFETY TALK",
 						"P5M, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
 						"Safety Talk, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
 						"Sosialisasi Golden Rules",
 						"Sosialisasi IBPR",
 					];
 
-					if (!allowedEventTypes.includes(eventType)) continue;
+					if (
+						!allowedEventTypes.some(
+							(type) => type.toUpperCase() === eventType.toUpperCase(),
+						)
+					) continue;
 
 					const week = text(row.getCell(17).value);
 					if (!week) continue;
