@@ -872,8 +872,6 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 					.map(({
 						nik: _nik,
 						employeeStatus: _employeeStatus,
-						ibprDates: _ibprDates,
-						grDates: _grDates,
 						eligibleForTarget: _eligibleForTarget,
 						...employee
 					}) => employee),
