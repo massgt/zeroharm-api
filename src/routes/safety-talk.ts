@@ -7,7 +7,6 @@ import {
 	attendanceUploadLinksTable,
 	excelUploadsTable,
 } from "../db/index.js";
-import { isAdminRequest } from "./auth.js";
 
 const router: IRouter = Router();
 const TARGET_PER_MONTH = 4;
@@ -279,23 +278,8 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 			summary,
 		};
 
-		if (!isAdminRequest(req)) {
-			res.json({
-				...commonResponse,
-				employees: employees
-					.filter((employee) => employee.eligibleForTarget)
-					.map(
-						({
-							nik: _nik,
-							employeeStatus: _employeeStatus,
-							eligibleForTarget: _eligibleForTarget,
-							...employee
-						}) => employee,
-					),
-			});
-			return;
-		}
-
+		// Tampilkan seluruh karyawan aktif, termasuk yang sedang cuti,
+		// untuk semua role. Status cuti hanya mengecualikan mereka dari denominator.
 		res.json({ ...commonResponse, employees });
 	} catch (error) {
 		req.log.error({ err: error }, "Failed to fetch Safety Talk dashboard");
