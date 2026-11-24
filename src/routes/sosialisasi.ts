@@ -870,7 +870,6 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 				employees: employees
 					.filter((employee) => employee.eligibleForTarget)
 					.map(({
-						nik: _nik,
 						employeeStatus: _employeeStatus,
 						eligibleForTarget: _eligibleForTarget,
 						...employee
