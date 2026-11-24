@@ -228,10 +228,18 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 		const belum = eligible.filter(
 			(employee) => employee.status === "Belum",
 		).length;
-		const achievement = (value: number) =>
-			eligible.length
-				? Math.round((value / eligible.length) * 10000) / 100
-				: 0;
+		// Overall achievement is the average individual monthly progress,
+		// not the percentage of employees who have already reached 100%.
+		const overallAchievement = eligible.length
+			? Math.round(
+					(eligible.reduce(
+						(sum, employee) => sum + employee.totalProgress,
+						0,
+					) /
+						eligible.length) *
+						100,
+				) / 100
+			: 0;
 
 		const weeklyAchievement = weeks.map((week) => {
 			const average = eligible.length
@@ -250,7 +258,7 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 			complete,
 			partial,
 			belum,
-			achievement: achievement(complete),
+			achievement: overallAchievement,
 			weeklyAchievement,
 			totalEvents: relevantAttendance.length,
 			uniqueNiks: new Set(relevantAttendance.map((event) => event.nik)).size,
