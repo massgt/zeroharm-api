@@ -864,23 +864,9 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 			summary,
 		};
 
-		if (!isAdminRequest(req)) {
-			res.json({
-				...commonResponse,
-				employees: employees
-					.filter((employee) => employee.eligibleForTarget)
-					.map(({
-						nik: _nik,
-						employeeStatus: _employeeStatus,
-						ibprDates: _ibprDates,
-						grDates: _grDates,
-						eligibleForTarget: _eligibleForTarget,
-						...employee
-					}) => employee),
-			});
-			return;
-		}
-
+		// Seluruh karyawan aktif ditampilkan untuk Admin dan Viewer.
+		// Status cuti tetap disertakan beserta riwayat dan progressnya;
+		// eligibleForTarget hanya menentukan apakah karyawan masuk denominator.
 		res.json({
 			...commonResponse,
 			employees,

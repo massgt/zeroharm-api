@@ -371,14 +371,20 @@ async function parseExcelStreaming(
 				// Kolom D: Tipe Event
 				const eventType = String(r[3] ?? "").trim();
 
-				const allowedEventTypes = [
-					"P5M, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
-					"Safety Talk, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
-					"Sosialisasi Golden Rules",
-					"Sosialisasi IBPR",
-				];
+				const normalizeAttendanceEventType = (value: unknown) =>
+	String(value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 
-				if (!allowedEventTypes.includes(eventType)) continue;
+const allowedAttendanceEventTypes = new Set([
+	"SAFETYTALK",
+	"SAFETYTALKSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES",
+	"P5MSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES",
+	"SOSIALISASIGOLDENRULES",
+	"SOSIALISASIIBPR",
+]);
+
+				if (!allowedAttendanceEventTypes.has(normalizeAttendanceEventType(eventType))) {
+					continue;
+				}
 
 				// Kolom Q: Week
 				const week = String(r[16] ?? "").trim();
