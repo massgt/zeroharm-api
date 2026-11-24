@@ -31,16 +31,31 @@ const allowedOrigins = (process.env.FRONTEND_ORIGINS ?? "")
 	.split(",")
 	.map((origin) => origin.trim())
 	.filter(Boolean);
-app.use(cors({
-	credentials: true,
-	origin(origin, callback) {
-		if (!origin || allowedOrigins.includes(origin)) {
-			callback(null, true);
-			return;
-		}
-		callback(new Error("Origin not allowed by CORS"));
-	},
-}));
+
+// Allow only this project's Vercel dashboard preview URLs in preview deployments.
+// Production continues to use the explicit FRONTEND_ORIGINS allowlist.
+const isDashboardPreviewOrigin = (origin: string) =>
+	process.env.VERCEL_ENV === "preview" &&
+	/^https:\/\/zeroharm-dashboard(?:-[a-z0-9-]+)?-sigit-wijayas-projects\.vercel\.app$/.test(
+		origin,
+	);
+
+app.use(
+	cors({
+		credentials: true,
+		origin(origin, callback) {
+			if (
+				!origin ||
+				allowedOrigins.includes(origin) ||
+				isDashboardPreviewOrigin(origin)
+			) {
+				callback(null, true);
+				return;
+			}
+			callback(new Error("Origin not allowed by CORS"));
+		},
+	}),
+);
 app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
