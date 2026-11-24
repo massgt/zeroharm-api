@@ -379,7 +379,11 @@ async function parseExcelStreaming(
 					"Sosialisasi IBPR",
 				];
 
-				if (!allowedEventTypes.includes(eventType)) continue;
+				if (
+					!allowedEventTypes.some(
+						(type) => type.toUpperCase() === eventType.toUpperCase(),
+					)
+				) continue;
 
 				// Kolom Q: Week
 				const week = String(r[16] ?? "").trim();
