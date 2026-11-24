@@ -132,6 +132,7 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 			.select({
 				nik: attendanceRecordsTable.nik,
 				eventType: attendanceRecordsTable.eventType,
+				week: attendanceRecordsTable.week,
 			})
 			.from(attendanceRecordsTable)
 			.where(
