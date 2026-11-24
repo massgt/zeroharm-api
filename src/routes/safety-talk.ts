@@ -20,19 +20,9 @@ router.get("/periods", async (_req, res): Promise<void> => {
     const periods = await db
       .select({ year: attendanceRecordsTable.year, month: attendanceRecordsTable.month })
       .from(attendanceRecordsTable)
-      .where(eq(attendanceRecordsTable.eventType, "SAFETY TALK"))
       .groupBy(attendanceRecordsTable.year, attendanceRecordsTable.month)
       .orderBy(desc(attendanceRecordsTable.year), desc(attendanceRecordsTable.month));
-    // Include periods that contain the combined Safety Talk event as well.
-    const combined = await db
-      .select({ year: attendanceRecordsTable.year, month: attendanceRecordsTable.month })
-      .from(attendanceRecordsTable)
-      .where(eq(attendanceRecordsTable.eventType, "Safety Talk, Sosialisasi IBPR, dan Sosialisasi Golden Rules"))
-      .groupBy(attendanceRecordsTable.year, attendanceRecordsTable.month)
-      .orderBy(desc(attendanceRecordsTable.year), desc(attendanceRecordsTable.month));
-    const unique = new Map<string, { year: number; month: number }>();
-    for (const period of [...periods, ...combined]) unique.set(`${period.year}-${period.month}`, period);
-    res.json({ success: true, periods: [...unique.values()].sort((a, b) => b.year - a.year || b.month - a.month) });
+    res.json({ success: true, periods });
   } catch (error) {
     res.status(500).json({ error: "Gagal mengambil periode Safety Talk." });
   }
@@ -75,7 +65,7 @@ router.get("/dashboard", async (req, res): Promise<void> => {
       isOnLeave: teamMembersTable.isOnLeave,
     }).from(teamMembersTable).where(eq(teamMembersTable.isActive, true)).orderBy(teamMembersTable.name);
 
-    const weeks = [...new Set(attendance.filter(e => SAFETY_TALK_TYPES.has(e.eventType)).map(e => e.week))]
+    const weeks = [...new Set(attendance.map(e => e.week))]
       .sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
 
     const progress = new Map<string, Map<string, { count: number; dates: string[] }>>();
