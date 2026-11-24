@@ -11,9 +11,12 @@ import { isAdminRequest } from "./auth.js";
 
 const router: IRouter = Router();
 const TARGET_PER_MONTH = 4;
+const normalizeEventType = (value: string) =>
+	value.trim().replace(/\\s+/g, " ").toUpperCase();
+
 const SAFETY_TALK_TYPES = new Set([
 	"SAFETY TALK",
-	"Safety Talk, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
+	"SAFETY TALK, SOSIALISASI IBPR, DAN SOSIALISASI GOLDEN RULES",
 ]);
 
 // GET /api/safety-talk/periods
@@ -151,7 +154,7 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 
 		const countByNik = new Map<string, number>();
 		const relevantAttendance = attendance.filter((event) =>
-			SAFETY_TALK_TYPES.has(event.eventType),
+			SAFETY_TALK_TYPES.has(normalizeEventType(event.eventType)),
 		);
 
 		for (const event of relevantAttendance) {
