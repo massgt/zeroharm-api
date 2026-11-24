@@ -372,6 +372,7 @@ async function parseExcelStreaming(
 				const eventType = String(r[3] ?? "").trim();
 
 				const allowedEventTypes = [
+					"SAFETY TALK",
 					"P5M, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
 					"Safety Talk, Sosialisasi IBPR, dan Sosialisasi Golden Rules",
 					"Sosialisasi Golden Rules",
