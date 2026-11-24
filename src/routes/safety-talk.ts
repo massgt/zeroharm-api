@@ -12,11 +12,11 @@ import { isAdminRequest } from "./auth.js";
 const router: IRouter = Router();
 const TARGET_PER_MONTH = 4;
 const normalizeEventType = (value: string) =>
-	value.trim().replace(/\\s+/g, " ").toUpperCase();
+	value.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
 const SAFETY_TALK_TYPES = new Set([
-	"SAFETY TALK",
-	"SAFETY TALK, SOSIALISASI IBPR, DAN SOSIALISASI GOLDEN RULES",
+	"SAFETYTALK",
+	"SAFETYTALKSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES",
 ]);
 
 // GET /api/safety-talk/periods
