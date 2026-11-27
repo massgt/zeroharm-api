@@ -56,3 +56,10 @@ export async function getGoogleSheetValues(
 
 	return (response.data.values ?? []) as string[][];
 }
+
+
+/** Fetch only required columns; avoids downloading/parsing the full XLSX workbook. */
+export async function getGoogleSheetValuesBatch(spreadsheetId:string,ranges:string[]):Promise<unknown[][]>{
+ const sheets=getSheetsClient();const response=await sheets.spreadsheets.values.batchGet({spreadsheetId,ranges,majorDimension:"COLUMNS",valueRenderOption:"UNFORMATTED_VALUE",dateTimeRenderOption:"SERIAL_NUMBER"});
+ return (response.data.valueRanges??[]).map(range=>(range.values?.[0]??[]) as unknown[]);
+}
