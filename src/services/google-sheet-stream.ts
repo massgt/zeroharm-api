@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { StringDecoder } from "node:string_decoder";
-import { createRequire } from "node:module";
 import { SaxesParser } from "saxes";
-const unzipper: any = createRequire(import.meta.url)("unzipper");
+// @ts-ignore unzipper does not ship TypeScript declarations
+import unzipper from "unzipper";
 
 
 const COMPANY = "PT. Minergo Visi Maxima";
