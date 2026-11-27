@@ -181,16 +181,24 @@ async function parseSelectedColumns(data:Map<string,Map<string,unknown[]>>,onEnt
  }logGoogleSheetStage("parser_completed",started,{sheetsProcessed,entries,attendanceEntries:attendanceEntries.length,rowsProcessed});return{rowsProcessed,entries,attendanceEntries,sheetsProcessed};
 }
 export async function parseGoogleDriveXlsx(fileId:string,onEntry?:(entry:ParsedGoogleEntry)=>Promise<void>|void):Promise<{rowsProcessed:number;entries:number;attendanceEntries:ParsedGoogleAttendanceEntry[];sheetsProcessed:string[]}>{
- const started=performance.now();const drive=await import("./google-drive.js");const file=await drive.getGoogleDriveFile(fileId);
+ const started=performance.now(),drive=await import("./google-drive.js"),file=await drive.getGoogleDriveFile(fileId);
  logGoogleSheetStage("drive_metadata_completed",started,{mimeType:file.mimeType,fileSizeBytes:file.size?Number(file.size):null});
- const native="application/vnd.google-apps.spreadsheet";
- if(file.mimeType===native){const ranges:string[]=[],meta:{sheet:keyof typeof SHEET_COLUMNS;column:string}[]=[];for(const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[])for(const column of SHEET_COLUMNS[sheet]){ranges.push("'"+sheet+"'!"+column+":"+column);meta.push({sheet,column});}
-  const values=await getGoogleSheetValuesBatch(fileId,ranges),data=new Map<string,Map<string,unknown[]>>();for(let i=0;i<meta.length;i++){const m=meta[i],cols=data.get(m.sheet)??new Map<string,unknown[]>();cols.set(m.column,values[i]??[]);data.set(m.sheet,cols);}return parseSelectedColumns(data,onEntry);
+ const native="application/vnd.google-apps.spreadsheet",office=new Set(["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/vnd.ms-excel"]);
+ let spreadsheetId=fileId,tempId:string|undefined;
+ if(office.has(file.mimeType)){logGoogleSheetStage("office_conversion_started",started,{fileSizeBytes:file.size?Number(file.size):null});tempId=await drive.convertExcelToTemporaryGoogleSheet(fileId);spreadsheetId=tempId;logGoogleSheetStage("office_conversion_completed",started,{temporarySpreadsheetCreated:true});}
+ else if(file.mimeType!==native)throw new Error("Format file tidak didukung. Gunakan Google Spreadsheet atau Excel .xlsx.");
+ const totals={rowsProcessed:0,entries:0,attendanceEntries:[] as ParsedGoogleAttendanceEntry[],sheetsProcessed:[] as string[]};
+ try{
+  for(const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[]){
+   const columns=SHEET_COLUMNS[sheet],ranges=columns.map(col=>"'"+sheet+"'!"+col+":"+col),values=await getGoogleSheetValuesBatch(spreadsheetId,ranges);
+   const byColumn=new Map<string,unknown[]>();for(let i=0;i<columns.length;i++)byColumn.set(columns[i],values[i]??[]);
+   const data=new Map<string,Map<string,unknown[]>>();data.set(sheet,byColumn);
+   const result=await parseSelectedColumns(data,onEntry);
+   totals.rowsProcessed+=result.rowsProcessed;totals.entries+=result.entries;totals.attendanceEntries.push(...result.attendanceEntries);totals.sheetsProcessed.push(...result.sheetsProcessed);
+   logGoogleSheetStage("worksheet_released",started,{sheet,attendanceRows:result.attendanceEntries.length,parsedEntries:result.entries});
+  }
+  logGoogleSheetStage("parser_completed",started,totals);return totals;
+ }finally{
+  if(tempId){try{await drive.deleteGoogleDriveFile(tempId);logGoogleSheetStage("temporary_spreadsheet_deleted",started);}catch(error){console.error(JSON.stringify({scope:"google_sheet_parser",stage:"temporary_spreadsheet_cleanup_failed",message:error instanceof Error?error.message:String(error)}));}}
  }
- const office=new Set(["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/vnd.ms-excel"]);if(!office.has(file.mimeType))throw new Error("Format file tidak didukung. Gunakan Google Spreadsheet atau Excel .xlsx.");
- const stream=await drive.downloadGoogleDriveFile(fileId),chunks:Buffer[]=[];for await(const chunk of stream as AsyncIterable<Buffer|Uint8Array|string>)chunks.push(Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk));const buffer=Buffer.concat(chunks);
- logGoogleSheetStage("drive_download_completed",started,{downloadedBytes:buffer.length,mode:"office_xlsx_in_memory"});
- const xlsx=await import("xlsx"),workbook=xlsx.read(buffer,{type:"buffer",cellDates:true,cellStyles:false,cellFormula:false,cellHTML:false,cellNF:false,dense:true}),data=new Map<string,Map<string,unknown[]>>();
- for(const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[]){const ws=workbook.Sheets[sheet];if(!ws)continue;const rows=xlsx.utils.sheet_to_json<unknown[]>(ws,{header:1,defval:"",raw:true}),cols=new Map<string,unknown[]>();for(const col of SHEET_COLUMNS[sheet])cols.set(col,rows.map(r=>(r as unknown[])[COLUMN_INDEX[col]]??""));data.set(sheet,cols);}
- logGoogleSheetStage("workbook_initialized",started,{sheets:workbook.SheetNames.length,mode:"office_xlsx_in_memory"});return parseSelectedColumns(data,onEntry);
 }
