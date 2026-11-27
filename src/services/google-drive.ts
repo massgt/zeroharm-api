@@ -1,7 +1,7 @@
 import { google } from "googleapis";
 import fs from "node:fs";
 
-const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
+const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 
 function getGoogleCredentials() {
 	const credentialsValue = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
