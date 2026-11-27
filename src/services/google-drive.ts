@@ -46,6 +46,7 @@ export interface GoogleDriveFileInfo {
 	name: string;
 	mimeType: string;
 	size?: string;
+	parents?: string[];
 }
 
 export async function getGoogleDriveFile(
@@ -55,7 +56,7 @@ export async function getGoogleDriveFile(
 
 	const response = await drive.files.get({
 		fileId,
-		fields: "id,name,mimeType,size",
+		fields: "id,name,mimeType,size,parents",
 		supportsAllDrives: true,
 	});
 
@@ -70,6 +71,7 @@ export async function getGoogleDriveFile(
 		name: file.name,
 		mimeType: file.mimeType,
 		size: file.size ?? undefined,
+		parents: file.parents ?? [],
 	};
 }
 
@@ -110,6 +112,7 @@ export async function convertExcelToTemporaryGoogleSheet(fileId: string): Promis
   requestBody:{
    name:`zeroharm-import-tmp-${Date.now()}-${source.name.replace(/\\.(xlsx|xls)$/i,"")}`,
    mimeType:"application/vnd.google-apps.spreadsheet",
+   parents:source.parents?.length ? source.parents : undefined,
   },
   media:{mimeType:source.mimeType,body:stream as NodeJS.ReadableStream},
   fields:"id",
