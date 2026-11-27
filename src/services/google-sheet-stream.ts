@@ -164,28 +164,33 @@ const SHEET_COLUMNS = {
 } as const;
 const COLUMN_INDEX: Record<string,number> = {A:0,B:1,C:2,D:3,E:4,F:5,G:6,H:7,I:8,J:9,K:10,L:11,M:12,N:13,O:14,P:15,Q:16,R:17,S:18,T:19,U:20,V:21,W:22,X:23,Y:24,Z:25,AA:26,AB:27,AC:28,AD:29,AE:30,AF:31,AG:32};
 
-export async function parseGoogleDriveXlsx(fileId:string,onEntry?:(entry:ParsedGoogleEntry)=>Promise<void>|void):Promise<{rowsProcessed:number;entries:number;attendanceEntries:ParsedGoogleAttendanceEntry[];sheetsProcessed:string[]}> {
- const started=performance.now(); const attendanceEntries:ParsedGoogleAttendanceEntry[]=[]; const sheetsProcessed:string[]=[]; let rowsProcessed=0,entries=0;
- const normalizeEvent=(v:unknown)=>String(v??"").toUpperCase().replace(/[^A-Z0-9]/g,"");
- const allowedEvents=new Set(["SAFETYTALK","SAFETYTALKSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES","P5MSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES","SOSIALISASIGOLDENRULES","SOSIALISASIIBPR"]);
- const ranges:string[]=[]; const meta:{sheet:keyof typeof SHEET_COLUMNS;column:string}[]=[];
- for(const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[]) for(const column of SHEET_COLUMNS[sheet]) {ranges.push(`'${sheet}'!${column}:${column}`);meta.push({sheet,column});}
- logGoogleSheetStage("sheets_api_read_started",started,{ranges:ranges.length});
- const values=await getGoogleSheetValuesBatch(fileId,ranges);
- logGoogleSheetStage("sheets_api_read_completed",started,{ranges:ranges.length,returnedRanges:values.length});
- const data=new Map<string,Map<string,unknown[]>>();
- for(let i=0;i<meta.length;i++){const m=meta[i];const cols=data.get(m.sheet)??new Map<string,unknown[]>();cols.set(m.column,values[i]??[]);data.set(m.sheet,cols);}
- for(const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[]){const cols=data.get(sheet);if(!cols)continue;const maxRows=Math.max(0,...Array.from(cols.values(),v=>v.length));let accepted=0;
-  for(let ri=1;ri<maxRows;ri++){const row:unknown[]=[];for(const col of SHEET_COLUMNS[sheet])row[COLUMN_INDEX[col]]=cols.get(col)?.[ri]??"";
-   if(sheet==="Attendance"){if(!isMinergoCompany(row[11]))continue;const nik=text(row[6]),eventDate=getGoogleAttendanceEventDate(row[1]),eventType=text(row[3]),week=text(row[16]),month=number(row[17]);if(!nik||!eventDate||!week||!Number.isInteger(month)||month<1||month>12||!allowedEvents.has(normalizeEvent(eventType)))continue;attendanceEntries.push({nik,eventDate,eventType,week,month,year:Number(eventDate.slice(0,4))});accepted++;continue;}
-   let entry:ParsedGoogleEntry|undefined;
-   if(sheet==="Hazard"){if(!isMinergoCompany(row[6]))continue;const nik=text(row[2]),sourceId=text(row[0]),week=text(row[31]);if(!nik||!sourceId||!week)continue;entry={sourceId:`haz_${sourceId}`,type:"hazard",nik,week,month:number(row[32]),year:excelDateToYear(row[22])};if(text(row[15]).toUpperCase()==="TTA"){await onEntry?.({...entry,sourceId:`tta_${sourceId}`,type:"tta"});entries++;}}
-   else if(sheet==="Inspeksi"){if(!isMinergoCompany(row[4]))continue;const nik=text(row[2]),sourceId=text(row[6]),week=text(row[22]);if(!nik||!sourceId||!week)continue;entry={sourceId:`ins_${sourceId}`,type:"inspeksi",nik,week,month:number(row[23]),year:excelDateToYear(row[16]),timeCompliance:text(row[25])};}
-   else if(sheet==="Observasi"){if(!isMinergoCompany(row[22]))continue;const nik=text(row[18]),sourceId=text(row[0]),week=text(row[23]);if(!nik||!sourceId||!week)continue;entry={sourceId:`obs_${sourceId}`,type:"observasi",nik,week,month:number(row[24]),year:excelDateToYear(row[5])};}
-   else if(sheet==="OPK"){if(!isMinergoCompany(row[3]))continue;const nik=text(row[2]),sourceId=text(row[0]),week=text(row[18]);if(!nik||!sourceId||!week||number(row[17])!==1)continue;const subType=normalizeOPKSubType(row[15]);if(!subType)continue;entry={sourceId:`opk_${sourceId}`,type:"opk",subType,nik,week,month:number(row[19]),year:excelDateToYear(row[16])};}
-   if(entry){await onEntry?.(entry);entries++;rowsProcessed++;accepted++;}
-  }
-  sheetsProcessed.push(sheet);logGoogleSheetStage("worksheet_completed",started,{sheet,rowsRead:Math.max(0,maxRows-1),rowsAccepted:accepted});
+async function parseSelectedColumns(data:Map<string,Map<string,unknown[]>>,onEntry?:(entry:ParsedGoogleEntry)=>Promise<void>|void){
+ const started=performance.now(),attendanceEntries:ParsedGoogleAttendanceEntry[]=[],sheetsProcessed:string[]=[];let rowsProcessed=0,entries=0;
+ const norm=(v:unknown)=>String(v??"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+ const allowed=new Set(["SAFETYTALK","SAFETYTALKSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES","P5MSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES","SOSIALISASIGOLDENRULES","SOSIALISASIIBPR"]);
+ for(const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[]){const cols=data.get(sheet);if(!cols)continue;const max=Math.max(0,...Array.from(cols.values(),v=>v.length));let accepted=0;
+  for(let ri=1;ri<max;ri++){const row:unknown[]=[];for(const col of SHEET_COLUMNS[sheet])row[COLUMN_INDEX[col]]=cols.get(col)?.[ri]??"";
+   if(sheet==="Attendance"){if(!isMinergoCompany(row[11]))continue;const nik=text(row[6]),date=getGoogleAttendanceEventDate(row[1]),type=text(row[3]),week=text(row[16]),month=number(row[17]);if(!nik||!date||!week||!Number.isInteger(month)||month<1||month>12||!allowed.has(norm(type)))continue;attendanceEntries.push({nik,eventDate:date,eventType:type,week,month,year:Number(date.slice(0,4))});accepted++;continue;}
+   let e:ParsedGoogleEntry|undefined;
+   if(sheet==="Hazard"){if(!isMinergoCompany(row[6]))continue;const nik=text(row[2]),id=text(row[0]),week=text(row[31]);if(!nik||!id||!week)continue;e={sourceId:"haz_"+id,type:"hazard",nik,week,month:number(row[32]),year:excelDateToYear(row[22])};if(text(row[15]).toUpperCase()==="TTA"){await onEntry?.({...e,sourceId:"tta_"+id,type:"tta"});entries++;}}
+   else if(sheet==="Inspeksi"){if(!isMinergoCompany(row[4]))continue;const nik=text(row[2]),id=text(row[6]),week=text(row[22]);if(!nik||!id||!week)continue;e={sourceId:"ins_"+id,type:"inspeksi",nik,week,month:number(row[23]),year:excelDateToYear(row[16]),timeCompliance:text(row[25])};}
+   else if(sheet==="Observasi"){if(!isMinergoCompany(row[22]))continue;const nik=text(row[18]),id=text(row[0]),week=text(row[23]);if(!nik||!id||!week)continue;e={sourceId:"obs_"+id,type:"observasi",nik,week,month:number(row[24]),year:excelDateToYear(row[5])};}
+   else if(sheet==="OPK"){if(!isMinergoCompany(row[3]))continue;const nik=text(row[2]),id=text(row[0]),week=text(row[18]);if(!nik||!id||!week||number(row[17])!==1)continue;const sub=normalizeOPKSubType(row[15]);if(!sub)continue;e={sourceId:"opk_"+id,type:"opk",subType:sub,nik,week,month:number(row[19]),year:excelDateToYear(row[16])};}
+   if(e){await onEntry?.(e);entries++;rowsProcessed++;accepted++;}
+  }sheetsProcessed.push(sheet);logGoogleSheetStage("worksheet_completed",started,{sheet,rowsRead:Math.max(0,max-1),rowsAccepted:accepted});
+ }logGoogleSheetStage("parser_completed",started,{sheetsProcessed,entries,attendanceEntries:attendanceEntries.length,rowsProcessed});return{rowsProcessed,entries,attendanceEntries,sheetsProcessed};
+}
+export async function parseGoogleDriveXlsx(fileId:string,onEntry?:(entry:ParsedGoogleEntry)=>Promise<void>|void):Promise<{rowsProcessed:number;entries:number;attendanceEntries:ParsedGoogleAttendanceEntry[];sheetsProcessed:string[]}>{
+ const started=performance.now();const drive=await import("./google-drive.js");const file=await drive.getGoogleDriveFile(fileId);
+ logGoogleSheetStage("drive_metadata_completed",started,{mimeType:file.mimeType,fileSizeBytes:file.size?Number(file.size):null});
+ const native="application/vnd.google-apps.spreadsheet";
+ if(file.mimeType===native){const ranges:string[]=[],meta:{sheet:keyof typeof SHEET_COLUMNS;column:string}[]=[];for(const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[])for(const column of SHEET_COLUMNS[sheet]){ranges.push("'"+sheet+"'!"+column+":"+column);meta.push({sheet,column});}
+  const values=await getGoogleSheetValuesBatch(fileId,ranges),data=new Map<string,Map<string,unknown[]>>();for(let i=0;i<meta.length;i++){const m=meta[i],cols=data.get(m.sheet)??new Map<string,unknown[]>();cols.set(m.column,values[i]??[]);data.set(m.sheet,cols);}return parseSelectedColumns(data,onEntry);
  }
- logGoogleSheetStage("parser_completed",started,{sheetsProcessed,entries,attendanceEntries:attendanceEntries.length,rowsProcessed});return {rowsProcessed,entries,attendanceEntries,sheetsProcessed};
+ const office=new Set(["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/vnd.ms-excel"]);if(!office.has(file.mimeType))throw new Error("Format file tidak didukung. Gunakan Google Spreadsheet atau Excel .xlsx.");
+ const stream=await drive.downloadGoogleDriveFile(fileId),chunks:Buffer[]=[];for await(const chunk of stream as AsyncIterable<Buffer|Uint8Array|string>)chunks.push(Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk));const buffer=Buffer.concat(chunks);
+ logGoogleSheetStage("drive_download_completed",started,{downloadedBytes:buffer.length,mode:"office_xlsx_in_memory"});
+ const xlsx=await import("xlsx"),workbook=xlsx.read(buffer,{type:"buffer",cellDates:true,cellStyles:false,cellFormula:false,cellHTML:false,cellNF:false,dense:true}),data=new Map<string,Map<string,unknown[]>>();
+ for(const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[]){const ws=workbook.Sheets[sheet];if(!ws)continue;const rows=xlsx.utils.sheet_to_json<unknown[]>(ws,{header:1,defval:"",raw:true}),cols=new Map<string,unknown[]>();for(const col of SHEET_COLUMNS[sheet])cols.set(col,rows.map(r=>(r as unknown[])[COLUMN_INDEX[col]]??""));data.set(sheet,cols);}
+ logGoogleSheetStage("workbook_initialized",started,{sheets:workbook.SheetNames.length,mode:"office_xlsx_in_memory"});return parseSelectedColumns(data,onEntry);
 }
