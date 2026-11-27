@@ -1,5 +1,4 @@
-import ExcelJS from "exceljs";
-import type { Readable } from "node:stream";
+import * as xlsx from "xlsx";
 
 import { downloadGoogleDriveFile, getGoogleDriveFile } from "./google-drive.js";
 
@@ -93,35 +92,16 @@ export interface ParsedGoogleAttendanceEntry {
 	year: number;
 }
 
-function cellValue(value: ExcelJS.CellValue): unknown {
-	if (value === null || value === undefined) {
-		return "";
-	}
-
-	if (typeof value === "object") {
-		if ("result" in value) {
-			return value.result ?? "";
-		}
-
-		if ("text" in value) {
-			return value.text ?? "";
-		}
-	}
-
-	return value;
+function text(value: unknown): string {
+	return String(value ?? "").trim();
 }
 
-function text(value: ExcelJS.CellValue): string {
-	return String(cellValue(value) ?? "").trim();
-}
-
-function number(value: ExcelJS.CellValue): number {
-	const parsed = Number(cellValue(value));
+function number(value: unknown): number {
+	const parsed = Number(value);
 	return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function excelDateToYear(value: ExcelJS.CellValue): number {
-	const raw = cellValue(value);
+function excelDateToYear(raw: unknown): number {
 
 	if (raw instanceof Date) {
 		return raw.getFullYear();
@@ -140,7 +120,7 @@ function excelDateToYear(value: ExcelJS.CellValue): number {
 	return new Date().getFullYear();
 }
 
-function normalizeOPKSubType(value: ExcelJS.CellValue): OPKSubType | undefined {
+function normalizeOPKSubType(value: unknown): OPKSubType | undefined {
 	const str = text(value).toLowerCase();
 
 	if (str.includes("sidak p2h")) return "p2h";
@@ -178,6 +158,14 @@ function logGoogleSheetStage(
 	);
 }
 
+async function downloadStreamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of stream as AsyncIterable<Buffer | Uint8Array | string>) {
+		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+	}
+	return Buffer.concat(chunks);
+}
+
 export async function parseGoogleDriveXlsx(
 	fileId: string,
 	onEntry?: (entry: ParsedGoogleEntry) => Promise<void> | void,
@@ -190,17 +178,13 @@ export async function parseGoogleDriveXlsx(
 	const totalStartedAt = performance.now();
 
 	try {
-		// 1. GET GOOGLE DRIVE METADATA
 		const metadataStartedAt = performance.now();
-
-		logGoogleSheetStage("drive_metadata_started", metadataStartedAt, {
-			fileId,
-		});
+		logGoogleSheetStage("drive_metadata_started", metadataStartedAt, { fileId });
 
 		const file = await getGoogleDriveFile(fileId);
-
 		logGoogleSheetStage("drive_metadata_completed", metadataStartedAt, {
 			mimeType: file.mimeType,
+			fileSizeBytes: file.size ? Number(file.size) : null,
 		});
 
 		if (
@@ -210,73 +194,73 @@ export async function parseGoogleDriveXlsx(
 			throw new Error(`Unsupported Google Drive file type: ${file.mimeType}`);
 		}
 
-		// 2. DOWNLOAD XLSX
+		// ExcelJS WorkbookReader menulis worksheet XML sementara ke /tmp apabila
+		// worksheet muncul sebelum sharedStrings.xml di dalam arsip XLSX.
+		// Pada serverless runtime, file XML hasil ekstraksi dapat memenuhi /tmp.
+		// Gunakan parser buffer SheetJS agar proses Google Sheet tidak membuat
+		// file worksheet sementara di disk.
 		const downloadStartedAt = performance.now();
-
-		logGoogleSheetStage("drive_download_started", downloadStartedAt, {
-			fileId,
-		});
+		logGoogleSheetStage("drive_download_started", downloadStartedAt, { fileId });
 
 		const stream = await downloadGoogleDriveFile(fileId);
+		const workbookBuffer = await downloadStreamToBuffer(stream);
 
-		logGoogleSheetStage("drive_download_completed", downloadStartedAt);
+		logGoogleSheetStage("drive_download_completed", downloadStartedAt, {
+			downloadedBytes: workbookBuffer.length,
+		});
 
-		// 3. INITIALIZE STREAMING WORKBOOK
 		const workbookStartedAt = performance.now();
-
-		const workbook = new ExcelJS.stream.xlsx.WorkbookReader(
-			stream as Readable,
-			{
-				entries: "ignore",
-				sharedStrings: "cache",
-				styles: "ignore",
-				hyperlinks: "ignore",
-				worksheets: "emit",
-			},
-		);
-
-		logGoogleSheetStage("workbook_initialized", workbookStartedAt);
+		const workbook = xlsx.read(workbookBuffer, {
+			type: "buffer",
+			cellDates: true,
+			cellStyles: false,
+			cellFormula: false,
+			cellHTML: false,
+			cellNF: false,
+			dense: true,
+		});
+		logGoogleSheetStage("workbook_initialized", workbookStartedAt, {
+			sheets: workbook.SheetNames.length,
+			downloadedBytes: workbookBuffer.length,
+		});
 
 		let rowsProcessed = 0;
 		let entries = 0;
 		let callbackDurationMs = 0;
-
 		const attendanceEntries: ParsedGoogleAttendanceEntry[] = [];
 		const sheetsProcessed: string[] = [];
-
-		const allowedSheets = [
+		const allowedSheets = new Set([
 			"Hazard",
 			"Inspeksi",
 			"Observasi",
 			"OPK",
 			"Attendance",
-		];
+		]);
 
-		// 4. STREAM WORKSHEETS
-		for await (const worksheetReader of workbook) {
-			const sheetName = String(
-				(worksheetReader as unknown as { name?: string }).name ?? "",
-			);
-
-			if (!allowedSheets.includes(sheetName)) {
-				continue;
-			}
+		for (const sheetName of workbook.SheetNames) {
+			if (!allowedSheets.has(sheetName)) continue;
 
 			const sheetStartedAt = performance.now();
+			const worksheet = workbook.Sheets[sheetName];
+			if (!worksheet) continue;
 
+			const rows = xlsx.utils.sheet_to_json<unknown[]>(worksheet, {
+				header: 1,
+				defval: "",
+				raw: true,
+			});
+
+			sheetsProcessed.push(sheetName);
 			let rowsRead = 0;
 			let rowsAccepted = 0;
 
-			sheetsProcessed.push(sheetName);
 			logGoogleSheetStage("worksheet_started", sheetStartedAt, {
 				sheet: sheetName,
+				rowCount: Math.max(0, rows.length - 1),
 			});
 
-			for await (const row of worksheetReader) {
-				if (row.number === 1) {
-					continue;
-				}
-
+			for (let rowIndex = 1; rowIndex < rows.length; rowIndex++) {
+				const row = rows[rowIndex] ?? [];
 				rowsRead++;
 
 				if (rowsRead % 10000 === 0) {
@@ -287,47 +271,36 @@ export async function parseGoogleDriveXlsx(
 					});
 				}
 
-				let entry: ParsedGoogleEntry | undefined;
-
-				// ATTENDANCE
 				if (sheetName === "Attendance") {
-					const company = row.getCell(12).value;
+					if (!isMinergoCompany(row[11])) continue;
 
-					if (!isMinergoCompany(company)) continue;
-
-					const nik = text(row.getCell(7).value);
+					const nik = text(row[6]);
 					if (!nik) continue;
 
-					const eventDate = getGoogleAttendanceEventDate(row.getCell(2).value);
+					const eventDate = getGoogleAttendanceEventDate(row[1]);
 					if (!eventDate) continue;
 
-					const eventType = text(row.getCell(4).value);
-
+					const eventType = text(row[3]);
 					const normalizeAttendanceEventType = (value: unknown) =>
-	String(value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+						String(value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 
-const allowedAttendanceEventTypes = new Set([
-	"SAFETYTALK",
-	"SAFETYTALKSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES",
-	"P5MSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES",
-	"SOSIALISASIGOLDENRULES",
-	"SOSIALISASIIBPR",
-]);
+					const allowedAttendanceEventTypes = new Set([
+						"SAFETYTALK",
+						"SAFETYTALKSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES",
+						"P5MSOSIALISASIIBPRDANSOSIALISASIGOLDENRULES",
+						"SOSIALISASIGOLDENRULES",
+						"SOSIALISASIIBPR",
+					]);
 
 					if (!allowedAttendanceEventTypes.has(normalizeAttendanceEventType(eventType))) {
 						continue;
 					}
 
-					const week = text(row.getCell(17).value);
+					const week = text(row[16]);
 					if (!week) continue;
 
-					const month = number(row.getCell(18).value);
-
-					if (!Number.isInteger(month) || month < 1 || month > 12) {
-						continue;
-					}
-
-					const year = Number(eventDate.slice(0, 4));
+					const month = number(row[17]);
+					if (!Number.isInteger(month) || month < 1 || month > 12) continue;
 
 					attendanceEntries.push({
 						nik,
@@ -335,22 +308,19 @@ const allowedAttendanceEventTypes = new Set([
 						eventType,
 						week,
 						month,
-						year,
+						year: Number(eventDate.slice(0, 4)),
 					});
-
 					rowsAccepted++;
 					continue;
 				}
 
-				// HAZARD
+				let entry: ParsedGoogleEntry | undefined;
+
 				if (sheetName === "Hazard") {
-					const company = text(row.getCell(7).value);
-					if (company !== COMPANY) continue;
-
-					const nik = text(row.getCell(3).value);
-					const sourceId = text(row.getCell(1).value);
-					const week = text(row.getCell(32).value);
-
+					if (text(row[6]) !== COMPANY) continue;
+					const nik = text(row[2]);
+					const sourceId = text(row[0]);
+					const week = text(row[31]);
 					if (!nik || !sourceId || !week) continue;
 
 					entry = {
@@ -358,36 +328,25 @@ const allowedAttendanceEventTypes = new Set([
 						type: "hazard",
 						nik,
 						week,
-						month: number(row.getCell(33).value),
-						year: excelDateToYear(row.getCell(23).value),
+						month: number(row[32]),
+						year: excelDateToYear(row[22]),
 					};
 
-					const jenisTemuan = text(row.getCell(16).value).toUpperCase();
-
-					if (jenisTemuan === "TTA") {
+					if (text(row[15]).toUpperCase() === "TTA") {
 						const callbackStartedAt = performance.now();
-
 						await onEntry?.({
 							...entry,
 							sourceId: `tta_${sourceId}`,
 							type: "tta",
 						});
-
 						callbackDurationMs += performance.now() - callbackStartedAt;
-
 						entries++;
 					}
-				}
-
-				// INSPEKSI
-				if (sheetName === "Inspeksi") {
-					const company = text(row.getCell(5).value);
-					if (company !== COMPANY) continue;
-
-					const nik = text(row.getCell(3).value);
-					const sourceId = text(row.getCell(7).value);
-					const week = text(row.getCell(23).value);
-
+				} else if (sheetName === "Inspeksi") {
+					if (text(row[4]) !== COMPANY) continue;
+					const nik = text(row[2]);
+					const sourceId = text(row[6]);
+					const week = text(row[22]);
 					if (!nik || !sourceId || !week) continue;
 
 					entry = {
@@ -395,21 +354,15 @@ const allowedAttendanceEventTypes = new Set([
 						type: "inspeksi",
 						nik,
 						week,
-						month: number(row.getCell(24).value),
-						year: excelDateToYear(row.getCell(17).value),
-						timeCompliance: text(row.getCell(26).value),
+						month: number(row[23]),
+						year: excelDateToYear(row[16]),
+						timeCompliance: text(row[25]),
 					};
-				}
-
-				// OBSERVASI
-				if (sheetName === "Observasi") {
-					const company = text(row.getCell(23).value);
-					if (company !== COMPANY) continue;
-
-					const nik = text(row.getCell(19).value);
-					const sourceId = text(row.getCell(1).value);
-					const week = text(row.getCell(24).value);
-
+				} else if (sheetName === "Observasi") {
+					if (text(row[22]) !== COMPANY) continue;
+					const nik = text(row[18]);
+					const sourceId = text(row[0]);
+					const week = text(row[23]);
 					if (!nik || !sourceId || !week) continue;
 
 					entry = {
@@ -417,26 +370,18 @@ const allowedAttendanceEventTypes = new Set([
 						type: "observasi",
 						nik,
 						week,
-						month: number(row.getCell(25).value),
-						year: excelDateToYear(row.getCell(6).value),
+						month: number(row[24]),
+						year: excelDateToYear(row[5]),
 					};
-				}
-
-				// OPK
-				if (sheetName === "OPK") {
-					const company = text(row.getCell(4).value);
-					if (company !== COMPANY) continue;
-
-					const nik = text(row.getCell(3).value);
-					const sourceId = text(row.getCell(1).value);
-					const week = text(row.getCell(19).value);
-
+				} else if (sheetName === "OPK") {
+					if (text(row[3]) !== COMPANY) continue;
+					const nik = text(row[2]);
+					const sourceId = text(row[0]);
+					const week = text(row[18]);
 					if (!nik || !sourceId || !week) continue;
+					if (number(row[17]) !== 1) continue;
 
-					const status = number(row.getCell(18).value);
-					if (status !== 1) continue;
-
-					const subType = normalizeOPKSubType(row.getCell(16).value);
+					const subType = normalizeOPKSubType(row[15]);
 					if (!subType) continue;
 
 					entry = {
@@ -445,19 +390,15 @@ const allowedAttendanceEventTypes = new Set([
 						subType,
 						nik,
 						week,
-						month: number(row.getCell(20).value),
-						year: excelDateToYear(row.getCell(17).value),
+						month: number(row[19]),
+						year: excelDateToYear(row[16]),
 					};
 				}
 
-				// FORWARD SAP ENTRY
 				if (entry) {
 					const callbackStartedAt = performance.now();
-
 					await onEntry?.(entry);
-
 					callbackDurationMs += performance.now() - callbackStartedAt;
-
 					entries++;
 					rowsProcessed++;
 					rowsAccepted++;
@@ -473,26 +414,20 @@ const allowedAttendanceEventTypes = new Set([
 			});
 		}
 
-		// 5. PARSING COMPLETED
 		logGoogleSheetStage("parser_completed", totalStartedAt, {
 			sheetsProcessed,
 			sapEntries: entries,
 			attendanceEntries: attendanceEntries.length,
 			rowsProcessed,
 			callbackDurationMs: Math.round(callbackDurationMs),
+			downloadedBytes: workbookBuffer.length,
 		});
 
-		return {
-			rowsProcessed,
-			entries,
-			attendanceEntries,
-			sheetsProcessed,
-		};
+		return { rowsProcessed, entries, attendanceEntries, sheetsProcessed };
 	} catch (error) {
 		logGoogleSheetStage("parser_failed", totalStartedAt, {
 			error: error instanceof Error ? error.message : String(error),
 		});
-
 		throw error;
 	}
 }
