@@ -1,7 +1,7 @@
 import { google } from "googleapis";
 import fs from "node:fs";
 
-const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
+const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
 
 function getGoogleCredentials() {
 	const credentialsValue = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -96,4 +96,30 @@ export async function testGoogleDriveFile(
 	fileId: string,
 ): Promise<GoogleDriveFileInfo> {
 	return getGoogleDriveFile(fileId);
+}
+
+/**
+ * Convert an existing Office spreadsheet into a temporary native Google Sheet.
+ * The source file is streamed Drive-to-Drive and is never buffered in application memory.
+ */
+export async function convertExcelToTemporaryGoogleSheet(fileId: string): Promise<string> {
+ const drive=getDriveClient();
+ const source=await getGoogleDriveFile(fileId);
+ const stream=await downloadGoogleDriveFile(fileId);
+ const response=await drive.files.create({
+  requestBody:{
+   name:`zeroharm-import-tmp-${Date.now()}-${source.name.replace(/\\.(xlsx|xls)$/i,"")}`,
+   mimeType:"application/vnd.google-apps.spreadsheet",
+  },
+  media:{mimeType:source.mimeType,body:stream as NodeJS.ReadableStream},
+  fields:"id",
+  supportsAllDrives:true,
+ });
+ if(!response.data.id) throw new Error("Google Drive gagal membuat spreadsheet sementara hasil konversi");
+ return response.data.id;
+}
+
+export async function deleteGoogleDriveFile(fileId:string):Promise<void>{
+ const drive=getDriveClient();
+ await drive.files.delete({fileId,supportsAllDrives:true});
 }
