@@ -1,4 +1,15 @@
 import { getGoogleSheetValuesBatch } from "./google-sheets.js";
+import { createWriteStream } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { stat, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pipeline } from "node:stream/promises";
+import { StringDecoder } from "node:string_decoder";
+import { createRequire } from "node:module";
+import { SaxesParser } from "saxes";
+const unzipper: any = createRequire(import.meta.url)("unzipper");
+
 
 const COMPANY = "PT. Minergo Visi Maxima";
 
@@ -180,27 +191,240 @@ async function parseSelectedColumns(data:Map<string,Map<string,unknown[]>>,onEnt
   }sheetsProcessed.push(sheet);logGoogleSheetStage("worksheet_completed",started,{sheet,rowsRead:Math.max(0,max-1),rowsAccepted:accepted});
  }logGoogleSheetStage("parser_completed",started,{sheetsProcessed,entries,attendanceEntries:attendanceEntries.length,rowsProcessed});return{rowsProcessed,entries,attendanceEntries,sheetsProcessed};
 }
-export async function parseGoogleDriveXlsx(fileId:string,onEntry?:(entry:ParsedGoogleEntry)=>Promise<void>|void):Promise<{rowsProcessed:number;entries:number;attendanceEntries:ParsedGoogleAttendanceEntry[];sheetsProcessed:string[]}>{
- const started=performance.now();
- const drive=await import("./google-drive.js");
- const file=await drive.getGoogleDriveFile(fileId);
- logGoogleSheetStage("drive_metadata_completed",started,{mimeType:file.mimeType,fileSizeBytes:file.size?Number(file.size):null});
- if(file.mimeType!=="application/vnd.google-apps.spreadsheet"){
-   throw new Error("Sumber ini terdeteksi sebagai file Office Excel, bukan Google Spreadsheet native. Dengan akses Viewer/read-only, sistem tidak akan mengonversi, membuat, atau menghapus file di Drive BIB. Minta pemilik sumber menyediakan Google Spreadsheet native, atau gunakan jalur parser XLSX read-only yang tidak menulis ke Drive.");
- }
- const totals={rowsProcessed:0,entries:0,attendanceEntries:[] as ParsedGoogleAttendanceEntry[],sheetsProcessed:[] as string[]};
- for(const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[]){
-   const columns=SHEET_COLUMNS[sheet],ranges=columns.map(col=>"'"+sheet+"'!"+col+":"+col);
-   const values=await getGoogleSheetValuesBatch(fileId,ranges);
-   const byColumn=new Map<string,unknown[]>();
-   for(let i=0;i<columns.length;i++)byColumn.set(columns[i],values[i]??[]);
-   const data=new Map<string,Map<string,unknown[]>>();data.set(sheet,byColumn);
-   const result=await parseSelectedColumns(data,onEntry);
-   totals.rowsProcessed+=result.rowsProcessed;totals.entries+=result.entries;
-   totals.attendanceEntries.push(...result.attendanceEntries);
-   totals.sheetsProcessed.push(...result.sheetsProcessed);
-   logGoogleSheetStage("worksheet_released",started,{sheet,attendanceRows:result.attendanceEntries.length,parsedEntries:result.entries});
- }
- logGoogleSheetStage("parser_completed",started,totals);
- return totals;
+
+function parseXmlEntry(
+	stream: NodeJS.ReadableStream,
+	onOpen: (name: string, attributes: Record<string, string>) => void,
+	onText: (value: string) => void,
+	onClose: (name: string) => void,
+): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const parser = new SaxesParser({ xmlns: false });
+		const decoder = new StringDecoder("utf8");
+		let settled = false;
+		const fail = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			reject(error);
+		};
+		parser.on("opentag", (tag) => onOpen(tag.name, tag.attributes as Record<string, string>));
+		parser.on("text", onText);
+		parser.on("closetag", (tag) => onClose(tag.name));
+		parser.on("error", fail);
+		stream.on("error", fail);
+		stream.on("data", (chunk: Buffer) => {
+			try { parser.write(decoder.write(chunk)); } catch (error) { fail(error); }
+		});
+		stream.on("end", () => {
+			try {
+				parser.write(decoder.end());
+				parser.close();
+				if (!settled) { settled = true; resolve(); }
+			} catch (error) { fail(error); }
+		});
+	});
+}
+
+async function readSharedStrings(entry: any): Promise<string[]> {
+	const values: string[] = [];
+	let current: string[] | undefined;
+	await parseXmlEntry(
+		entry.stream(),
+		(name) => { if (name === "si") current = []; },
+		(value) => { if (current) current.push(value); },
+		(name) => {
+			if (name === "si" && current) {
+				values.push(current.join(""));
+				current = undefined;
+			}
+		},
+	);
+	return values;
+}
+
+async function readWorkbookSheets(workbookEntry: any, relationshipsEntry: any): Promise<Map<string, string>> {
+	const relationshipTargets = new Map<string, string>();
+	await parseXmlEntry(
+		relationshipsEntry.stream(),
+		(name, attributes) => {
+			if (name === "Relationship" && attributes.Id && attributes.Target) {
+				relationshipTargets.set(attributes.Id, attributes.Target);
+			}
+		},
+		() => {},
+		() => {},
+	);
+	const sheets = new Map<string, string>();
+	await parseXmlEntry(
+		workbookEntry.stream(),
+		(name, attributes) => {
+			if (name === "sheet" && attributes.name && attributes["r:id"]) {
+				const target = relationshipTargets.get(attributes["r:id"]);
+				if (target) {
+					const normalized = path.posix.normalize(
+						target.startsWith("/") ? target.slice(1) : path.posix.join("xl", target),
+					);
+					sheets.set(attributes.name, normalized);
+				}
+			}
+		},
+		() => {},
+		() => {},
+	);
+	return sheets;
+}
+
+function columnNameFromCellReference(reference: string): string {
+	return reference.match(/^[A-Z]+/)?.[0] ?? "";
+}
+
+async function readWorksheetColumns(entry: any, columns: readonly string[], sharedStrings: string[]): Promise<Map<string, unknown[]>> {
+	const selected = new Set<string>(columns);
+	const values = new Map<string, unknown[]>(columns.map((column) => [column, [] as unknown[]]));
+	let row: Map<string, unknown> | undefined;
+	let cellColumn: string | undefined;
+	let cellType = "";
+	let cellValue = "";
+	let inValue = false;
+	await parseXmlEntry(
+		entry.stream(),
+		(name, attributes) => {
+			if (name === "row") row = new Map<string, unknown>();
+			if (name === "c" && row) {
+				const column = columnNameFromCellReference(attributes.r ?? "");
+				cellColumn = selected.has(column) ? column : undefined;
+				cellType = attributes.t ?? "";
+				cellValue = "";
+			}
+			if (name === "v" || name === "t") inValue = true;
+		},
+		(value) => { if (cellColumn && inValue) cellValue += value; },
+		(name) => {
+			if (name === "v" || name === "t") inValue = false;
+			if (name === "c" && row && cellColumn) {
+				let value: unknown = cellValue;
+				if (cellType === "s") {
+					const index = Number(cellValue);
+					value = Number.isInteger(index) ? sharedStrings[index] ?? "" : "";
+				} else if (cellType === "inlineStr" || cellType === "str") {
+					value = cellValue;
+				} else if (cellType === "b") {
+					value = cellValue === "1";
+				} else if (cellValue !== "" && Number.isFinite(Number(cellValue))) {
+					value = Number(cellValue);
+				}
+				row.set(cellColumn, value);
+				cellColumn = undefined;
+			}
+			if (name === "row" && row) {
+				for (const column of columns) values.get(column)!.push(row.get(column) ?? "");
+				row = undefined;
+			}
+		},
+	);
+	return values;
+}
+
+async function parseOfficeXlsx(fileId: string, onEntry?: (entry: ParsedGoogleEntry) => Promise<void> | void) {
+	const started = performance.now();
+	const drive = await import("./google-drive.js");
+	const source = await drive.downloadGoogleDriveFile(fileId);
+	const tempPath = path.join(tmpdir(), "bib-xlsx-" + randomUUID() + ".xlsx");
+	try {
+		await pipeline(source as NodeJS.ReadableStream, createWriteStream(tempPath));
+		logGoogleSheetStage("office_xlsx_download_completed", started, {
+			fileId,
+			fileSizeBytes: (await stat(tempPath)).size,
+		});
+		const archive = await unzipper.Open.file(tempPath);
+		const getEntry = (entryPath: string) => archive.files.find((entry: any) => entry.path === entryPath);
+		const workbookEntry = getEntry("xl/workbook.xml");
+		const relationshipsEntry = getEntry("xl/_rels/workbook.xml.rels");
+		const sharedStringsEntry = getEntry("xl/sharedStrings.xml");
+		if (!workbookEntry || !relationshipsEntry || !sharedStringsEntry) {
+			throw new Error("Struktur XLSX tidak lengkap (workbook, relasi, atau shared strings tidak ditemukan).");
+		}
+		const sheetPaths = await readWorkbookSheets(workbookEntry, relationshipsEntry);
+		const sharedStrings = await readSharedStrings(sharedStringsEntry);
+		logGoogleSheetStage("office_xlsx_shared_strings_loaded", started, { sharedStringCount: sharedStrings.length });
+		const totals = {
+			rowsProcessed: 0,
+			entries: 0,
+			attendanceEntries: [] as ParsedGoogleAttendanceEntry[],
+			sheetsProcessed: [] as string[],
+		};
+		for (const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[]) {
+			const sheetPath = sheetPaths.get(sheet);
+			if (!sheetPath) continue;
+			const worksheetEntry = getEntry(sheetPath);
+			if (!worksheetEntry) throw new Error("Worksheet " + sheet + " tidak ditemukan di arsip XLSX.");
+			const data = new Map<string, Map<string, unknown[]>>();
+			data.set(sheet, await readWorksheetColumns(worksheetEntry, SHEET_COLUMNS[sheet], sharedStrings));
+			const result = await parseSelectedColumns(data, onEntry);
+			totals.rowsProcessed += result.rowsProcessed;
+			totals.entries += result.entries;
+			totals.attendanceEntries.push(...result.attendanceEntries);
+			totals.sheetsProcessed.push(...result.sheetsProcessed);
+			logGoogleSheetStage("office_xlsx_worksheet_released", started, {
+				sheet,
+				entries: result.entries,
+				attendanceEntries: result.attendanceEntries.length,
+			});
+		}
+		logGoogleSheetStage("office_xlsx_parser_completed", started, totals);
+		return totals;
+	} finally {
+		await unlink(tempPath).catch(() => {});
+	}
+}
+
+export async function parseGoogleDriveXlsx(
+	fileId: string,
+	onEntry?: (entry: ParsedGoogleEntry) => Promise<void> | void,
+): Promise<{
+	rowsProcessed: number;
+	entries: number;
+	attendanceEntries: ParsedGoogleAttendanceEntry[];
+	sheetsProcessed: string[];
+}> {
+	const started = performance.now();
+	const drive = await import("./google-drive.js");
+	const file = await drive.getGoogleDriveFile(fileId);
+	logGoogleSheetStage("drive_metadata_completed", started, {
+		mimeType: file.mimeType,
+		fileSizeBytes: file.size ? Number(file.size) : null,
+	});
+	if (file.mimeType !== "application/vnd.google-apps.spreadsheet") {
+		if (file.mimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
+			return parseOfficeXlsx(fileId, onEntry);
+		}
+		throw new Error("Format file Drive tidak didukung: " + file.mimeType);
+	}
+	const totals = {
+		rowsProcessed: 0,
+		entries: 0,
+		attendanceEntries: [] as ParsedGoogleAttendanceEntry[],
+		sheetsProcessed: [] as string[],
+	};
+	for (const sheet of Object.keys(SHEET_COLUMNS) as (keyof typeof SHEET_COLUMNS)[]) {
+		const columns = SHEET_COLUMNS[sheet];
+		const ranges = columns.map((col) => "'" + sheet + "'!" + col + ":" + col);
+		const values = await getGoogleSheetValuesBatch(fileId, ranges);
+		const byColumn = new Map<string, unknown[]>();
+		for (let i = 0; i < columns.length; i++) byColumn.set(columns[i], values[i] ?? []);
+		const data = new Map<string, Map<string, unknown[]>>();
+		data.set(sheet, byColumn);
+		const result = await parseSelectedColumns(data, onEntry);
+		totals.rowsProcessed += result.rowsProcessed;
+		totals.entries += result.entries;
+		totals.attendanceEntries.push(...result.attendanceEntries);
+		totals.sheetsProcessed.push(...result.sheetsProcessed);
+		logGoogleSheetStage("worksheet_released", started, {
+			sheet,
+			attendanceRows: result.attendanceEntries.length,
+			parsedEntries: result.entries,
+		});
+	}
+	logGoogleSheetStage("parser_completed", started, totals);
+	return totals;
 }
