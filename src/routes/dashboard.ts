@@ -168,7 +168,7 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 	 * ke memori Node.js.
 	 */
 	const aggregateResult = await db.execute(sql`
-		WITH active_uploads AS (
+		WITH latest_upload_per_period AS (
 			SELECT DISTINCT ON (r.year, r.month)
 				r.year,
 				r.month,
@@ -177,6 +177,11 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 			INNER JOIN excel_uploads u ON u.id = r.upload_id
 			WHERE r.week = ${week}
 			ORDER BY r.year, r.month, u.uploaded_at DESC
+		),
+		active_uploads AS (
+			-- Match the previous Set semantics: one upload may cover multiple periods.
+			SELECT DISTINCT upload_id
+			FROM latest_upload_per_period
 		),
 		active_entries AS (
 			SELECT
