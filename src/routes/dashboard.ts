@@ -1,11 +1,10 @@
 import { Router, type IRouter } from "express";
-import { eq, sql, desc, inArray, and } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import {
 	db,
 	teamMembersTable,
 	reportEntriesTable,
-	excelUploadsTable,
 } from "../db/index.js";
 import { isAdminRequest } from "./auth.js";
 import {
@@ -164,100 +163,97 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 	/*
 	 * ACTIVE VERSION PERIODE
 	 *
-	 * Aturan:
-	 * - periode berbeda = versi aktif masing-masing
-	 * - upload terbaru menjadi active version
-	 * - jika satu week lintas bulan, data dari kedua bulan tetap digunakan
-	 *
-	 * Contoh W36:
-	 * 2026-08-W36 -> upload 55
-	 * 2026-09-W36 -> upload 54
-	 *
-	 * Maka dashboard W36 menggunakan keduanya.
+	 * Pilih upload terbaru untuk setiap periode tahun-bulan di PostgreSQL.
+	 * Data dihitung di database agar API tidak memuat seluruh baris laporan
+	 * ke memori Node.js.
 	 */
-
-	const rawEntries = await db
-		.select({
-			nik: reportEntriesTable.nik,
-			type: reportEntriesTable.type,
-			subType: reportEntriesTable.subType,
-			uploadId: reportEntriesTable.uploadId,
-			month: reportEntriesTable.month,
-			year: reportEntriesTable.year,
-			uploadedAt: excelUploadsTable.uploadedAt,
-		})
-		.from(reportEntriesTable)
-		.innerJoin(
-			excelUploadsTable,
-			eq(reportEntriesTable.uploadId, excelUploadsTable.id),
+	const aggregateResult = await db.execute(sql`
+		WITH active_uploads AS (
+			SELECT DISTINCT ON (r.year, r.month)
+				r.year,
+				r.month,
+				r.upload_id
+			FROM report_entries r
+			INNER JOIN excel_uploads u ON u.id = r.upload_id
+			WHERE r.week = ${week}
+			ORDER BY r.year, r.month, u.uploaded_at DESC
+		),
+		active_entries AS (
+			SELECT
+				r.nik,
+				r.type,
+				r.sub_type,
+				r.time_compliance
+			FROM report_entries r
+			INNER JOIN active_uploads a ON a.upload_id = r.upload_id
+			WHERE r.week = ${week}
+		),
+		category_counts AS (
+			SELECT
+				nik,
+				type,
+				sub_type,
+				count(*)::int AS actual
+			FROM active_entries
+			GROUP BY nik, type, sub_type
+		),
+		inspection_counts AS (
+			SELECT
+				nik,
+				count(*)::int AS total,
+				count(*) FILTER (WHERE time_compliance = 'Sesuai')::int AS sesuai
+			FROM active_entries
+			WHERE type = 'inspeksi'
+			GROUP BY nik
 		)
-		.where(eq(reportEntriesTable.week, week))
-		.orderBy(desc(excelUploadsTable.uploadedAt));
+		SELECT
+			'category'::text AS row_kind,
+			nik,
+			type,
+			sub_type,
+			actual,
+			NULL::int AS total,
+			NULL::int AS sesuai
+		FROM category_counts
+		UNION ALL
+		SELECT
+			'inspection'::text AS row_kind,
+			nik,
+			NULL::text AS type,
+			NULL::text AS sub_type,
+			NULL::int AS actual,
+			total,
+			sesuai
+		FROM inspection_counts
+		ORDER BY row_kind, nik
+	`);
 
-	/*
-	 * Pilih upload terbaru untuk setiap periode tahun-bulan.
-	 *
-	 * W36:
-	 * - 2026-08 -> upload terbaru Agustus
-	 * - 2026-09 -> upload terbaru September
-	 *
-	 * Keduanya tetap dipertahankan karena merupakan periode berbeda.
-	 */
-	const activeUploadByPeriod = new Map<string, number>();
+	type DashboardAggregateRow = {
+	row_kind: "category" | "inspection";
+	nik: string;
+	type: string | null;
+	sub_type: string | null;
+	actual: number | null;
+	total: number | null;
+	sesuai: number | null;
+};
+	const aggregateRows = aggregateResult.rows as DashboardAggregateRow[];
 
-	for (const row of rawEntries) {
-		const periodKey = `${row.year}-${row.month}`;
+	const counts: Record<string, Record<string, Record<string, number>>> = {};
+	const inspectionTimeCounts: Record<string, { total: number; sesuai: number }> = {};
 
-		if (!activeUploadByPeriod.has(periodKey)) {
-			activeUploadByPeriod.set(periodKey, row.uploadId);
+	for (const row of aggregateRows) {
+		if (row.row_kind === "category") {
+			if (!counts[row.nik]) counts[row.nik] = {};
+			if (!counts[row.nik][row.type!]) counts[row.nik][row.type!] = {};
+			const subType = row.sub_type ?? "_";
+			counts[row.nik][row.type!][subType] = row.actual ?? 0;
+			continue;
 		}
-	}
 
-	const activeUploadIds = new Set(activeUploadByPeriod.values());
-
-	/*
-	 * Hanya gunakan data dari active version.
-	 */
-	const entries = rawEntries
-		.filter((row) => activeUploadIds.has(row.uploadId))
-		.map((row) => ({
-			nik: row.nik,
-			type: row.type,
-			subType: row.subType,
-		}));
-
-	const inspectionTimeRows = await db
-		.select({
-			nik: reportEntriesTable.nik,
-			total: sql<number>`count(*)::int`,
-			sesuai: sql<number>`
-			count(*) FILTER (
-				WHERE ${reportEntriesTable.timeCompliance} = 'Sesuai'
-			)::int
-		`,
-		})
-		.from(reportEntriesTable)
-		.where(
-			and(
-				eq(reportEntriesTable.week, week),
-				eq(reportEntriesTable.type, "inspeksi"),
-				inArray(reportEntriesTable.uploadId, Array.from(activeUploadIds)),
-			),
-		)
-		.groupBy(reportEntriesTable.nik);
-
-	const inspectionTimeCounts: Record<
-		string,
-		{
-			total: number;
-			sesuai: number;
-		}
-	> = {};
-
-	for (const row of inspectionTimeRows) {
 		inspectionTimeCounts[row.nik] = {
-			total: row.total,
-			sesuai: row.sesuai,
+			total: row.total ?? 0,
+			sesuai: row.sesuai ?? 0,
 		};
 	}
 
@@ -265,14 +261,6 @@ router.get("/dashboard", async (req, res): Promise<void> => {
 		if (total === 0) return null;
 
 		return Math.min(100, Math.round((sesuai / total) * 100));
-	}
-
-	const counts: Record<string, Record<string, Record<string, number>>> = {};
-	for (const e of entries) {
-		if (!counts[e.nik]) counts[e.nik] = {};
-		if (!counts[e.nik][e.type]) counts[e.nik][e.type] = {};
-		counts[e.nik][e.type][e.subType ?? "_"] =
-			(counts[e.nik][e.type][e.subType ?? "_"] ?? 0) + 1;
 	}
 
 	function get(nik: string, type: string, subType?: string): number {
